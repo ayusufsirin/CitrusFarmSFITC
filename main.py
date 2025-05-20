@@ -1,3 +1,8 @@
+# %% Performance
+import csv
+import os
+import time
+
 # %%
 import cupy as cp
 import cupyx as cpx
@@ -150,6 +155,32 @@ def remap(old_value, old_min, old_max, new_min, new_max):
 # %%
 rospy.init_node('sf', anonymous=True)
 
+# Global variables for performance logging
+processing_times = []
+frame_counter = 0
+last_report_time = time.time()
+report_interval_frames = 100  # Report every 100 frames
+report_interval_seconds = 5  # Report every 5 seconds
+
+# CSV logging setup
+log_dir = os.path.expanduser("~/ros_sensor_fusion_logs")  # Log to user's home directory
+os.makedirs(log_dir, exist_ok=True)
+log_filename = os.path.join(log_dir, f"fusion_performance_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+log_file = open(log_filename, 'w', newline='')
+csv_writer = csv.writer(log_file)
+csv_writer.writerow(
+    ['Timestamp', 'FrameNumber', 'FusionTime_ms', 'TotalCallbackTime_ms', 'ZED_Timestamp_sec'])  # CSV Header
+
+
+# Register a shutdown hook to close the log file cleanly
+def shutdown_hook():
+    rospy.loginfo("Shutting down sensor fusion node. Closing log file.")
+    if log_file:
+        log_file.close()
+
+
+rospy.on_shutdown(shutdown_hook)
+
 # %%
 pg_depth_p = rospy.Publisher(PG_DEPTH_TOPIC, Image, queue_size=50)
 pg_camera_info_p = rospy.Publisher(PG_CAMERA_INFO_TOPIC, CameraInfo, queue_size=50)
@@ -172,8 +203,13 @@ pg_img = None
 
 # %%
 def zed_callback(zed_img: Image):
-    global vlp_depth, vlp_mean
+    global vlp_depth, vlp_mean, processing_times, frame_counter, last_report_time, csv_writer, log_file
+
     rospy.loginfo("zed callback")
+
+    # Record start time for the entire zed_callback processing
+    total_start_time = time.time()
+    zed_msg_timestamp = zed_img.header.stamp.to_sec() # Get ROS timestamp
 
     # ZED Preproc
     zed_depth = cp.array(bridge.imgmsg_to_cv2(zed_img, "32FC1"))
@@ -181,7 +217,13 @@ def zed_callback(zed_img: Image):
     zed_depth[zed_depth > 20] = vlp_mean
 
     # Sensor Fusion
+    fusion_start_time = time.time() # Start timing only the fusion part
     pg_depth = pg(zed_depth.copy(), vlp_depth.copy(), ncutoff=3, threshold=1)
+    fusion_end_time = time.time() # End timing fusion part
+    fusion_time_ms = (fusion_end_time - fusion_start_time) * 1000
+
+    processing_times.append(fusion_time_ms)
+    frame_counter += 1
 
     # Publish Image
     global pg_img
@@ -199,6 +241,39 @@ def zed_callback(zed_img: Image):
     pg_camera_info_p.publish(pg_camera_info_msg)
     pg_odom_p.publish(pg_odom_msg)
     rospy.loginfo("pg_odom published")
+
+    # End timing for the entire zed_callback processing
+    total_end_time = time.time()
+    total_processing_time_ms = (total_end_time - total_start_time) * 1000
+
+    # Log data to CSV
+    csv_writer.writerow([
+        time.time(),  # System timestamp
+        frame_counter,
+        fusion_time_ms,
+        total_processing_time_ms,
+        zed_msg_timestamp  # Original ZED message timestamp
+    ])
+    log_file.flush()  # Ensure data is written to disk immediately
+
+    # Report performance metrics periodically
+    current_time = time.time()
+    if frame_counter >= report_interval_frames or (current_time - last_report_time) >= report_interval_seconds:
+        if processing_times: # Ensure there's data to calculate
+            avg_fusion_time = sum(processing_times) / len(processing_times)
+            max_fusion_time = max(processing_times)
+            min_fusion_time = min(processing_times)
+            rospy.loginfo(f"--- Performance Report (Last {len(processing_times)} frames) ---")
+            rospy.loginfo(f"  Avg Fusion Time: {avg_fusion_time:.2f} ms")
+            rospy.loginfo(f"  Max Fusion Time: {max_fusion_time:.2f} ms")
+            rospy.loginfo(f"  Min Fusion Time: {min_fusion_time:.2f} ms")
+            rospy.loginfo(f"  Total ZED Callback Time (Current Frame): {total_processing_time_ms:.2f} ms")
+            rospy.loginfo(f"  Estimated Fusion Frame Rate: {1000 / avg_fusion_time:.2f} Hz")
+            rospy.loginfo(f"--------------------------------------------------")
+        processing_times = [] # Reset for the next interval
+        frame_counter = 0
+        last_report_time = current_time
+
 
 
 def vlp_callback(vlp_pc):
