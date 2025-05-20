@@ -12,7 +12,7 @@ from sensor_msgs.msg import PointCloud2, Image, CameraInfo
 # %%
 ZED_DEPTH_TOPIC = '/zed2i/zed_node/depth/depth_registered'  # '/islam/zed/depth'  # '/islam/zed_depth'
 ZED_CAMERA_INFO_TOPIC = '/zed2i/zed_node/depth/camera_info'  # '/islam/zed/camera_info'
-ZED_RGB_TOPIC = '/zed2i/zed_node/rgb/image_rect_color'  # '/islam/zed/rgb'
+ZED_RGB_TOPIC = '/zed2i/zed_node/left/image_rect_color'  # '/islam/zed/rgb'
 
 VLP_TOPIC = "/velodyne_points"
 
@@ -60,6 +60,7 @@ def cart_to_sph_pts(pts):
     # return appendSpherical_np(pts)[:,3:6]
 
 
+# %%
 def msg2pts(msg):
     return cp.array(list(pc2.read_points(msg, field_names=("x", "y", "z"))))
 
@@ -137,6 +138,7 @@ def pg(zed_depth, vlp_depth, ncutoff, threshold=100):
     return filtered
 
 
+# %%
 def remap(old_value, old_min, old_max, new_min, new_max):
     # Function to map a value from one range to another
     old_range = old_max - old_min
@@ -187,6 +189,7 @@ def zed_callback(zed_img: Image):
     pg_depth_msg = bridge.cv2_to_imgmsg(pg_depth.get())
     pg_depth_msg.header.stamp = zed_img.header.stamp
     pg_depth_p.publish(pg_depth_msg)
+    rospy.logwarn("pg_depth published")
 
     # Publish aux info
     pg_rgb_msg.header.stamp = zed_img.header.stamp
