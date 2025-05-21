@@ -27,6 +27,7 @@ PG_DEPTH_TOPIC = "/islam/pg_depth"
 PG_CAMERA_INFO_TOPIC = '/islam/pg_camera_info'
 PG_RGB_TOPIC = '/islam/pg_rgb'
 PG_ODOM_TOPIC = '/islam/pg_odom'
+PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 
 # %%
 ZED_V = 376
@@ -163,7 +164,7 @@ report_interval_frames = 100  # Report every 100 frames
 report_interval_seconds = 5  # Report every 5 seconds
 
 # CSV logging setup
-log_dir = os.path.expanduser("~/ros_sensor_fusion_logs")  # Log to user's home directory
+log_dir = os.path.expanduser("./logs")  # Log to user's home directory
 os.makedirs(log_dir, exist_ok=True)
 log_filename = os.path.join(log_dir, f"fusion_performance_{time.strftime('%Y%m%d_%H%M%S')}.csv")
 log_file = open(log_filename, 'w', newline='')
@@ -186,6 +187,7 @@ pg_depth_p = rospy.Publisher(PG_DEPTH_TOPIC, Image, queue_size=50)
 pg_camera_info_p = rospy.Publisher(PG_CAMERA_INFO_TOPIC, CameraInfo, queue_size=50)
 pg_rgb_p = rospy.Publisher(PG_RGB_TOPIC, Image, queue_size=50)
 pg_odom_p = rospy.Publisher(PG_ODOM_TOPIC, Odometry, queue_size=10)
+pg_fused_pc_p = rospy.Publisher(PG_FUSED_PC_TOPIC, PointCloud2, queue_size=10)
 
 pg_camera_info_msg = CameraInfo()
 pg_rgb_msg = Image()
@@ -232,6 +234,54 @@ def zed_callback(zed_img: Image):
     pg_depth_msg.header.stamp = zed_img.header.stamp
     pg_depth_p.publish(pg_depth_msg)
     rospy.logwarn("pg_depth published")
+
+    # --- NEW: Convert Fused Depth to PointCloud2 and Publish ---
+    # Need camera intrinsics for this. Assume pg_camera_info_msg is already populated.
+    # Convert depth image to Cartesian points first
+    # This part can be computationally heavy, consider if you need it for every frame.
+    # If not, you might publish it less frequently or only for debugging.
+
+    # Ensure pg_camera_info_msg has valid data before proceeding
+    if pg_camera_info_msg.K and pg_camera_info_msg.P:
+        # Get camera intrinsics from CameraInfo message
+        fx = pg_camera_info_msg.K[0]
+        fy = pg_camera_info_msg.K[4]
+        cx = pg_camera_info_msg.K[2]
+        cy = pg_camera_info_msg.K[5]
+
+        # Convert depth image to point cloud
+        rows, cols = pg_depth.shape
+        u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
+
+        # CuPy operations for point cloud generation
+        Z = pg_depth
+        X = (u - cx) * Z / fx
+        Y = (v - cy) * Z / fy
+
+        # Stack into N x 3 points
+        fused_cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+
+        # Filter out invalid points (e.g., where Z is 0 or NaN)
+        valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
+        fused_cart_pts = fused_cart_pts[valid_mask]
+
+        # Create PointCloud2 message
+        header = zed_img.header
+        header.frame_id = pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
+
+        # Convert CuPy array to NumPy for pc2.create_cloud
+        fused_cart_pts_np = fused_cart_pts.get()
+
+        fields = [
+            pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+        ]
+        pg_fused_pc_msg = pc2.create_cloud(header, fields, fused_cart_pts_np)
+        pg_fused_pc_p.publish(pg_fused_pc_msg)
+    else:
+        rospy.logwarn_throttle(5, "CameraInfo not received yet or invalid, skipping fused point cloud publication.")
+    # --- END NEW ---
 
     # Publish aux info
     pg_rgb_msg.header.stamp = zed_img.header.stamp
