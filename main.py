@@ -163,14 +163,27 @@ last_report_time = time.time()
 report_interval_frames = 100  # Report every 100 frames
 report_interval_seconds = 5  # Report every 5 seconds
 
+# --- ALGORITHM PARAMETERS TO BE LOGGED ---
+CURRENT_NCUTOFF = 0.5  # Example value, you will change this
+CURRENT_THRESHOLD = 100 # Example value, you will change this
+# You can add more parameters here if needed, e.g., LiDAR filtering range, etc.
+# ----------------------------------------
+
 # CSV logging setup
 log_dir = os.path.expanduser("./logs")  # Log to user's home directory
 os.makedirs(log_dir, exist_ok=True)
 log_filename = os.path.join(log_dir, f"fusion_performance_{time.strftime('%Y%m%d_%H%M%S')}.csv")
 log_file = open(log_filename, 'w', newline='')
 csv_writer = csv.writer(log_file)
-csv_writer.writerow(
-    ['Timestamp', 'FrameNumber', 'FusionTime_ms', 'TotalCallbackTime_ms', 'ZED_Timestamp_sec'])  # CSV Header
+csv_writer.writerow([
+    'Timestamp',
+    'FrameNumber',
+    'FusionTime_ms',
+    'TotalCallbackTime_ms',
+    'ZED_Timestamp_sec',
+    'ncutoff',  # New column
+    'threshold'  # New column
+])  # CSV Header
 
 
 # Register a shutdown hook to close the log file cleanly
@@ -206,6 +219,7 @@ pg_img = None
 # %%
 def zed_callback(zed_img: Image):
     global vlp_depth, vlp_mean, processing_times, frame_counter, last_report_time, csv_writer, log_file
+    global CURRENT_NCUTOFF, CURRENT_THRESHOLD # Access global parameters
 
     rospy.loginfo("zed callback")
 
@@ -220,7 +234,7 @@ def zed_callback(zed_img: Image):
 
     # Sensor Fusion
     fusion_start_time = time.time() # Start timing only the fusion part
-    pg_depth = pg(zed_depth.copy(), vlp_depth.copy(), ncutoff=3, threshold=1)
+    pg_depth = pg(zed_depth.copy(), vlp_depth.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
     fusion_end_time = time.time() # End timing fusion part
     fusion_time_ms = (fusion_end_time - fusion_start_time) * 1000
 
@@ -302,7 +316,9 @@ def zed_callback(zed_img: Image):
         frame_counter,
         fusion_time_ms,
         total_processing_time_ms,
-        zed_msg_timestamp  # Original ZED message timestamp
+        zed_msg_timestamp,  # Original ZED message timestamp
+        CURRENT_NCUTOFF,  # Log ncutoff
+        CURRENT_THRESHOLD  # Log threshold
     ])
     log_file.flush()  # Ensure data is written to disk immediately
 
@@ -314,6 +330,7 @@ def zed_callback(zed_img: Image):
             max_fusion_time = max(processing_times)
             min_fusion_time = min(processing_times)
             rospy.loginfo(f"--- Performance Report (Last {len(processing_times)} frames) ---")
+            rospy.loginfo(f"  Parameters: ncutoff={CURRENT_NCUTOFF}, threshold={CURRENT_THRESHOLD}") # Log params in console report
             rospy.loginfo(f"  Avg Fusion Time: {avg_fusion_time:.2f} ms")
             rospy.loginfo(f"  Max Fusion Time: {max_fusion_time:.2f} ms")
             rospy.loginfo(f"  Min Fusion Time: {min_fusion_time:.2f} ms")
