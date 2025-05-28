@@ -2,6 +2,7 @@
 import csv
 import os
 import time
+import logging
 
 # %%
 import cupy as cp
@@ -28,6 +29,9 @@ PG_CAMERA_INFO_TOPIC = '/islam/pg_camera_info'
 PG_RGB_TOPIC = '/islam/pg_rgb'
 PG_ODOM_TOPIC = '/islam/pg_odom'
 PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
+ZED_PC_TOPIC = "/islam/zed_pointcloud"
+
+VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 
 # %%
 ZED_V = 376
@@ -155,6 +159,7 @@ def remap(old_value, old_min, old_max, new_min, new_max):
 
 # %%
 rospy.init_node('sf', anonymous=True)
+rospy.set_param('/rosgraph/log_level', logging.DEBUG)
 
 # Global variables for performance logging
 processing_times = []
@@ -164,8 +169,8 @@ report_interval_frames = 100  # Report every 100 frames
 report_interval_seconds = 5  # Report every 5 seconds
 
 # --- ALGORITHM PARAMETERS TO BE LOGGED ---
-CURRENT_NCUTOFF = 0.5  # Example value, you will change this
-CURRENT_THRESHOLD = 100 # Example value, you will change this
+CURRENT_NCUTOFF = 10  # Example value, you will change this
+CURRENT_THRESHOLD = 1 # Example value, you will change this
 # You can add more parameters here if needed, e.g., LiDAR filtering range, etc.
 # ----------------------------------------
 
@@ -201,14 +206,21 @@ pg_camera_info_p = rospy.Publisher(PG_CAMERA_INFO_TOPIC, CameraInfo, queue_size=
 pg_rgb_p = rospy.Publisher(PG_RGB_TOPIC, Image, queue_size=50)
 pg_odom_p = rospy.Publisher(PG_ODOM_TOPIC, Odometry, queue_size=10)
 pg_fused_pc_p = rospy.Publisher(PG_FUSED_PC_TOPIC, PointCloud2, queue_size=10)
+zed_pc_p = rospy.Publisher(ZED_PC_TOPIC, PointCloud2, queue_size=10)
+
+vlp_filtered_pc_p = rospy.Publisher(VLP_FILTERED_PC_TOPIC, PointCloud2, queue_size=10)
 
 pg_camera_info_msg = CameraInfo()
 pg_rgb_msg = Image()
 pg_odom_msg = Odometry()
 bridge = CvBridge()
 
-zed_img = rospy.wait_for_message(ZED_DEPTH_TOPIC, Image)
-ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img, "32FC1")).shape
+zed_img_init = rospy.wait_for_message(ZED_DEPTH_TOPIC, Image)
+ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img_init, "32FC1")).shape
+# --- Store ZED's initial frame_id ---
+zed_depth_frame_id = zed_img_init.header.frame_id
+rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
+# ------------------------------------
 
 vlp_depth = cp.zeros((ZED_V, ZED_H), dtype=cp.float32)
 vlp_mean = 0
@@ -218,7 +230,7 @@ pg_img = None
 
 # %%
 def zed_callback(zed_img: Image):
-    global vlp_depth, vlp_mean, processing_times, frame_counter, last_report_time, csv_writer, log_file
+    global vlp_depth, vlp_mean, processing_times, frame_counter, last_report_time, csv_writer, log_file, zed_depth_frame_id
     global CURRENT_NCUTOFF, CURRENT_THRESHOLD # Access global parameters
 
     rospy.loginfo("zed callback")
@@ -257,43 +269,57 @@ def zed_callback(zed_img: Image):
 
     # Ensure pg_camera_info_msg has valid data before proceeding
     if pg_camera_info_msg.K and pg_camera_info_msg.P:
-        # Get camera intrinsics from CameraInfo message
-        fx = pg_camera_info_msg.K[0]
-        fy = pg_camera_info_msg.K[4]
-        cx = pg_camera_info_msg.K[2]
-        cy = pg_camera_info_msg.K[5]
+        def depth_to_cart_pts(depth, camera_info_msg):
+            # Get camera intrinsics from CameraInfo message
+            fx = camera_info_msg.K[0]
+            fy = camera_info_msg.K[4]
+            cx = camera_info_msg.K[2]
+            cy = camera_info_msg.K[5]
 
-        # Convert depth image to point cloud
-        rows, cols = pg_depth.shape
-        u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
+            # Convert depth image to point cloud
+            rows, cols = depth.shape
+            u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
 
-        # CuPy operations for point cloud generation
-        Z = pg_depth
-        X = (u - cx) * Z / fx
-        Y = (v - cy) * Z / fy
+            # CuPy operations for point cloud generation
+            Z = depth
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
 
-        # Stack into N x 3 points
-        fused_cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+            # Stack into N x 3 points
+            cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
 
-        # Filter out invalid points (e.g., where Z is 0 or NaN)
-        valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
-        fused_cart_pts = fused_cart_pts[valid_mask]
+            # Filter out invalid points (e.g., where Z is 0 or NaN)
+            valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
+            cart_pts = cart_pts[valid_mask]
+            return cart_pts
+
+        fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
+        zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+
+        def cart_pts_to_pc_msg(cart_pts, header):
+            # Convert CuPy array to NumPy for pc2.create_cloud
+            cart_pts_np = cart_pts.get()
+
+            fields = [
+                pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+                pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+                pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+            ]
+            pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
+            return pc_msg
 
         # Create PointCloud2 message
         header = zed_img.header
-        header.frame_id = pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
+        header.frame_id = zed_depth_frame_id  # pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
 
-        # Convert CuPy array to NumPy for pc2.create_cloud
-        fused_cart_pts_np = fused_cart_pts.get()
+        pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
+        zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
 
-        fields = [
-            pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
-            pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
-            pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
-        ]
-        pg_fused_pc_msg = pc2.create_cloud(header, fields, fused_cart_pts_np)
         pg_fused_pc_p.publish(pg_fused_pc_msg)
+        zed_pc_p.publish(zed_pc_msg)
+        rospy.loginfo("publish_pg")
     else:
+        rospy.logwarn("CameraInfo not received yet or invalid, skipping fused point cloud publication.")
         rospy.logwarn_throttle(5, "CameraInfo not received yet or invalid, skipping fused point cloud publication.")
     # --- END NEW ---
 
@@ -345,13 +371,40 @@ def zed_callback(zed_img: Image):
 
 def vlp_callback(vlp_pc):
     rospy.loginfo("vlp callback")
-    global vlp_depth, vlp_mean
+    global vlp_depth, vlp_mean, zed_depth_frame_id
 
     # VLP Preproc
     vlp_pts = msg2pts(vlp_pc)
     vlp_sph_pts_raw = cart_to_sph_pts(vlp_pts[vlp_pts[:, 0] > 0])
     mask = (vlp_sph_pts_raw[:, 2] < ZED_H_ANGLE / 2) & (vlp_sph_pts_raw[:, 2] > -ZED_H_ANGLE / 2)
     vlp_sph_pts = vlp_sph_pts_raw[mask]
+
+    rospy.logdebug("vlp_filtered_pc_p.publish1")
+
+    # --- NEW: PUBLISH FILTERED VLP POINT CLOUD ---
+    if len(vlp_sph_pts) > 0: # Ensure there are points to publish
+        # Convert filtered spherical points back to Cartesian for publishing
+        vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
+        vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get() # CuPy to NumPy
+
+        # Create PointCloud2 message for filtered VLP
+        header = vlp_pc.header # Use original VLP header for frame_id and timestamp
+        header.frame_id = zed_depth_frame_id
+        # It's crucial that the frame_id of this point cloud matches the frame_id of your ZED camera.
+        # If your LiDAR frame is different from your camera frame, you'll need a static transform
+        # between them in your TF tree for proper visualization in RViz.
+        # For now, we'll assume the transform is handled elsewhere or the frame_id is correct.
+        # header.frame_id = "velodyne" # Or your LiDAR's base frame if it's not aligned with ZED
+
+        fields = [
+            pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+            pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+        ]
+        vlp_filtered_pc_msg = pc2.create_cloud(header, fields, vlp_filtered_cart_pts_np)
+        vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
+        rospy.logdebug("vlp_filtered_pc_p.publish")
+    # -----------------------------------------------
 
     r, theta, phi = vlp_sph_pts.T
     theta = remap(theta, -LiDAR_ANGLE / 2, LiDAR_ANGLE / 2, 3 * ZED_V // 4, ZED_V // 4).astype(cp.int32)
