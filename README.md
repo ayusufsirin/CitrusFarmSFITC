@@ -34,6 +34,21 @@ Play ZED:
 rosbag play -l -u 10 ~/Development/DS/Citrus-Farm-Dataset/01_13B_Jackal/zed_2023-07-18-14-26-49_0.bag
 ```
 
+Play odom:
+
+```bash
+rosbag play -l -u 10 ~/Development/DS/Citrus-Farm-Dataset/01_13B_Jackal/odom_2023-07-18-14-26-48.bag
+```
+
+Play together:
+
+```bash
+rosbag play -l -u 10 \
+~/Development/DS/Citrus-Farm-Dataset/01_13B_Jackal/base_2023-07-18-14-26-48_0.bag \
+~/Development/DS/Citrus-Farm-Dataset/01_13B_Jackal/zed_2023-07-18-14-26-49_0.bag \
+~/Development/DS/Citrus-Farm-Dataset/01_13B_Jackal/odom_2023-07-18-14-26-48.bag
+```
+
 ## Start RViz:
 
 ```bash

@@ -20,7 +20,7 @@ ZED_DEPTH_TOPIC = '/zed2i/zed_node/depth/depth_registered'  # '/islam/zed/depth'
 ZED_CAMERA_INFO_TOPIC = '/zed2i/zed_node/depth/camera_info'  # '/islam/zed/camera_info'
 ZED_RGB_TOPIC = '/zed2i/zed_node/left/image_rect_color'  # '/islam/zed/rgb'
 
-VLP_TOPIC = "/velodyne_points"
+VLP_TOPIC = "/cumulative_origin_point_cloud"
 
 LOAM_ODOM_TOPIC = '/islam/loam_odom'
 
@@ -36,7 +36,7 @@ VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 # %%
 ZED_V = 376
 ZED_H = 672
-ZED_H_ANGLE = 87
+ZED_H_ANGLE = 102
 ZED_V_ANGLE = 56
 
 LiDAR_V = 16
@@ -218,7 +218,7 @@ bridge = CvBridge()
 zed_img_init = rospy.wait_for_message(ZED_DEPTH_TOPIC, Image)
 ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img_init, "32FC1")).shape
 # --- Store ZED's initial frame_id ---
-zed_depth_frame_id = zed_img_init.header.frame_id
+zed_depth_frame_id = 'map' # zed_img_init.header.frame_id
 rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
 # ------------------------------------
 
@@ -290,6 +290,13 @@ def zed_callback(zed_img: Image):
 
             # Filter out invalid points (e.g., where Z is 0 or NaN)
             valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
+
+            # Apply the rotation:
+            # New X (forward) = Old Z_camera
+            # New Y (left)    = Old (-X_camera)
+            # New Z (up)      = Old (-Y_camera)
+            cart_pts = cp.stack((Z, -X, -Y), axis=-1).reshape(-1, 3)
+
             cart_pts = cart_pts[valid_mask]
             return cart_pts
 
