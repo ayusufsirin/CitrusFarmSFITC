@@ -14,6 +14,7 @@ import sensor_msgs.point_cloud2 as pc2
 from cv_bridge import CvBridge
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, Image, CameraInfo
+import message_filters
 
 # %%
 ZED_DEPTH_TOPIC = '/zed2i/zed_node/depth/depth_registered'  # '/islam/zed/depth'  # '/islam/zed_depth'
@@ -22,7 +23,7 @@ ZED_RGB_TOPIC = '/zed2i/zed_node/left/image_rect_color'  # '/islam/zed/rgb'
 
 VLP_TOPIC = "/cumulative_origin_point_cloud"
 
-LOAM_ODOM_TOPIC = '/islam/loam_odom'
+LOAM_ODOM_TOPIC = '/islam/vlp_odom'
 
 PG_DEPTH_TOPIC = "/islam/pg_depth"
 PG_CAMERA_INFO_TOPIC = '/islam/pg_camera_info'
@@ -443,9 +444,45 @@ def odom_callback(msg):
 
 
 # %%
-rospy.Subscriber(VLP_TOPIC, PointCloud2, vlp_callback)
-rospy.Subscriber(ZED_RGB_TOPIC, Image, rgb_callback)
-rospy.Subscriber(ZED_CAMERA_INFO_TOPIC, CameraInfo, camera_info_callback)
-rospy.Subscriber(LOAM_ODOM_TOPIC, Odometry, odom_callback)
-rospy.Subscriber(ZED_DEPTH_TOPIC, Image, zed_callback)
+# rospy.Subscriber(VLP_TOPIC, PointCloud2, vlp_callback)
+# rospy.Subscriber(ZED_RGB_TOPIC, Image, rgb_callback)
+# rospy.Subscriber(ZED_CAMERA_INFO_TOPIC, CameraInfo, camera_info_callback)
+# rospy.Subscriber(LOAM_ODOM_TOPIC, Odometry, odom_callback)
+# rospy.Subscriber(ZED_DEPTH_TOPIC, Image, zed_callback)
+
+# %% Subscriber and Synchronizer Setup
+
+def synchronized_callback(zed_img: Image, vlp_pc: PointCloud2, rgb_msg: Image, cam_info_msg: CameraInfo, loam_odom_msg: Odometry):
+    rospy.loginfo("synchronized_callback")
+    rgb_callback(rgb_msg)
+    camera_info_callback(cam_info_msg)
+    odom_callback(loam_odom_msg)
+    vlp_callback(vlp_pc)
+    zed_callback(zed_img)
+    pass
+
+# Create message_filters subscribers
+depth_sub = message_filters.Subscriber(ZED_DEPTH_TOPIC, Image)
+vlp_sub = message_filters.Subscriber(VLP_TOPIC, PointCloud2)
+rgb_sub = message_filters.Subscriber(ZED_RGB_TOPIC, Image)
+cam_info_sub = message_filters.Subscriber(ZED_CAMERA_INFO_TOPIC, CameraInfo)
+odom_sub = message_filters.Subscriber(LOAM_ODOM_TOPIC, Odometry)
+
+# Create an ApproximateTimeSynchronizer
+# queue_size: How many sets of messages to buffer
+# slop: Maximum allowed time difference between messages in a set (seconds)
+# You may need to tune the 'slop' value based on your sensor synchronization and message arrival rates.
+# A larger slop allows more desynchronized messages but increases latency and potential for bad associations.
+# A smaller slop might cause you to miss many synchronized sets if messages are not perfectly aligned.
+ats = message_filters.ApproximateTimeSynchronizer(
+    [depth_sub, vlp_sub, rgb_sub, cam_info_sub, odom_sub],
+    # [rgb_sub, cam_info_sub],
+    queue_size=10, # Adjust as needed
+    slop=0.1 # 100 milliseconds tolerance, adjust based on your system
+)
+
+# Register the synchronized callback
+ats.registerCallback(synchronized_callback)
+
+# %%
 rospy.spin()
