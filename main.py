@@ -72,8 +72,47 @@ def cart_to_sph_pts(pts):
 
 
 # %%
+ROS_DATATYPE_TO_NP = {
+    1: np.int8,
+    2: np.uint8,
+    3: np.int16,
+    4: np.uint16,
+    5: np.int32,
+    6: np.uint32,
+    7: np.float32,
+    8: np.float64
+}
+
 def msg2pts(msg):
-    return cp.array(list(pc2.read_points(msg, field_names=("x", "y", "z"))))
+    # Map the msg.fields to get offsets and dtypes for x, y, z
+    wanted_fields = ["x", "y", "z"]
+    field_map = {f.name: f for f in msg.fields if f.name in wanted_fields}
+    dtype_list = []
+
+    for name in wanted_fields:
+        field = field_map[name]
+        np_dtype = ROS_DATATYPE_TO_NP[field.datatype]
+        dtype_list.append((name, np_dtype))
+
+    # Create structured dtype with correct offsets
+    offsets = [field_map[name].offset for name in wanted_fields]
+    max_offset = max(offsets)
+    point_step = msg.point_step
+
+    # Create dummy structured dtype with padding
+    structured_dtype = np.dtype({
+        'names': wanted_fields,
+        'formats': [ROS_DATATYPE_TO_NP[field_map[n].datatype] for n in wanted_fields],
+        'offsets': offsets,
+        'itemsize': point_step
+    })
+
+    # Interpret raw data
+    np_pts = np.frombuffer(msg.data, dtype=structured_dtype, count=msg.width * msg.height)
+
+    # Stack as float32 and convert to CuPy
+    xyz = np.stack([np_pts[name].astype(np.float32) for name in wanted_fields], axis=-1)
+    return cp.asarray(xyz)
 
 
 # %%
