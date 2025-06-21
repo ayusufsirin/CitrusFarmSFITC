@@ -194,6 +194,11 @@ csv_writer.writerow([
     'FrameNumber',
     'FusionTime_ms',
     'VLP_PreprocTime_ms',
+    'msg_to_pts_time_ms',
+    'cart_to_pts_time_ms',
+    'remap_time_ms',
+    'vlp_mean_time_ms',
+    'scatter_time_ms',
     'VLP_FilteredTime_ms',
     'ZED_PC_Time_ms',
     'TotalCallbackTime_ms',
@@ -229,9 +234,6 @@ zed_depth_frame_id = 'map'  # zed_img_init.header.frame_id
 rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
 # ------------------------------------
 
-vlp_depth = cp.zeros((ZED_V, ZED_H), dtype=cp.float32)
-
-
 # %% Subscriber and Synchronizer Setup
 
 def synchronized_callback(
@@ -256,27 +258,41 @@ def synchronized_callback(
 
     # Record start time for the entire processing
     total_start_time = time.time()
-    zed_msg_timestamp = zed_img_msg.header.stamp.to_sec()  # Get ROS timestamp
 
     # %% VLP Preproc
     vlp_preproc_start_time = time.time()
 
+    msg_to_pts_start_time = time.time()
     vlp_pts = msg2pts(vlp_pc_msg)
+    msg_to_pts_end_time = time.time()
+    msg_to_pts_time_ms = (msg_to_pts_end_time - msg_to_pts_start_time) * 1000
+
+    cart_to_pts_start_time = time.time()
     vlp_sph_pts_raw = cart_to_sph_pts(vlp_pts[vlp_pts[:, 0] > 0])
+    cart_to_pts_end_time = time.time()
+    cart_to_pts_time_ms = (cart_to_pts_end_time - cart_to_pts_start_time) * 1000
+
+    remap_start_time = time.time()
     mask = (vlp_sph_pts_raw[:, 2] < ZED_H_ANGLE / 2) & (vlp_sph_pts_raw[:, 2] > -ZED_H_ANGLE / 2)
     vlp_sph_pts = vlp_sph_pts_raw[mask]
-
     r, theta, phi = vlp_sph_pts.T
     theta = remap(theta, -LiDAR_ANGLE / 2, LiDAR_ANGLE / 2, 3 * ZED_V // 4, ZED_V // 4).astype(cp.int32)
     phi = remap(phi, ZED_V_ANGLE / 2, -ZED_V_ANGLE / 2, 0, ZED_H).astype(cp.int32)
+    remap_end_time = time.time()
+    remap_time_ms = (remap_end_time - remap_start_time) * 1000
 
+    vlp_mean_start_time = time.time()
     vlp_mean = cp.mean(vlp_sph_pts[:, 0])
+    vlp_mean_end_time = time.time()
+    vlp_mean_time_ms = (vlp_mean_end_time - vlp_mean_start_time) * 1000
 
+    scatter_start_time = time.time()
     vlp_depth = cp.zeros((ZED_V, ZED_H), dtype=cp.float32)
-
     cpx.scatter_add(vlp_depth, (theta, phi), r)
+    scatter_end_time = time.time()
+    scatter_time_ms = (scatter_end_time - scatter_start_time) * 1000
 
-    vlp_preproc_end_time = time.time()  # End timing fusion part
+    vlp_preproc_end_time = time.time()
     vlp_preproc_time_ms = (vlp_preproc_end_time - vlp_preproc_start_time) * 1000
 
     # %%  Publish filtered vlp point cloud
@@ -420,6 +436,11 @@ def synchronized_callback(
         frame_counter,
         fusion_time_ms,
         vlp_preproc_time_ms,
+        msg_to_pts_time_ms,
+        cart_to_pts_time_ms,
+        remap_time_ms,
+        vlp_mean_time_ms,
+        scatter_time_ms,
         vlp_filtered_time_ms,
         zed_pc_time_ms,
         total_processing_time_ms,
