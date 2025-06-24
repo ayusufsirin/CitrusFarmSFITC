@@ -206,6 +206,30 @@ def remap(old_value, old_min, old_max, new_min, new_max):
     return new_value
 
 
+# %% Faster PC creation from NP
+def create_cloud_from_np(header, fields, np_array):
+    """
+    Fast version of create_cloud, using NumPy vectorized byte representation.
+    Assumes np_array is (N, 3) float32 for (x, y, z).
+    """
+
+    # Flatten the array to 1D byte representation
+    data = np_array.astype(np.float32).tobytes()
+
+    cloud_msg = PointCloud2()
+    cloud_msg.header = header
+    cloud_msg.height = 1
+    cloud_msg.width = np_array.shape[0]
+    cloud_msg.fields = fields
+    cloud_msg.is_bigendian = False
+    cloud_msg.point_step = 12  # 3 floats * 4 bytes
+    cloud_msg.row_step = cloud_msg.point_step * np_array.shape[0]
+    cloud_msg.is_dense = True
+    cloud_msg.data = data
+
+    return cloud_msg
+
+
 # %%
 rospy.init_node('sf', anonymous=True)
 rospy.set_param('/rosgraph/log_level', logging.DEBUG)
@@ -280,9 +304,9 @@ ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img_init, "32FC1")).shape
 zed_depth_frame_id = 'map'  # zed_img_init.header.frame_id
 rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
 
-
 cp_to_np_time_ms = 0
 pc_to_msg_time_ms = 0
+
 
 # %% Subscriber and Synchronizer Setup
 
@@ -380,7 +404,8 @@ def synchronized_callback(
             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
             pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
         ]
-        vlp_filtered_pc_msg = pc2.create_cloud(header, fields, vlp_filtered_cart_pts_np)
+        # vlp_filtered_pc_msg = pc2.create_cloud(header, fields, vlp_filtered_cart_pts_np)
+        vlp_filtered_pc_msg = create_cloud_from_np(header, fields, vlp_filtered_cart_pts_np)
         vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
         filtered_publish_end_time = time.time()
         filtered_publish_time_ms = (filtered_publish_end_time - filtered_publish_start_time) * 1000
@@ -486,7 +511,8 @@ def synchronized_callback(
             ]
 
             pc_to_msg_start_time = time.time()
-            pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
+            # pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
+            pc_msg = create_cloud_from_np(header, fields, cart_pts_np)
             pc_to_msg_end_time = time.time()
             pc_to_msg_time_ms = (pc_to_msg_end_time - pc_to_msg_start_time) * 1000
             return pc_msg
