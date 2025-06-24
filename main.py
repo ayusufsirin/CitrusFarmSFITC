@@ -25,13 +25,13 @@ VLP_TOPIC = "/cumulative_origin_point_cloud"
 
 LOAM_ODOM_TOPIC = '/islam/vlp_odom'
 
+VLP_DEPTH_TOPIC = "/islam/vlp_depth"
 PG_DEPTH_TOPIC = "/islam/pg_depth"
 PG_CAMERA_INFO_TOPIC = '/islam/pg_camera_info'
 PG_RGB_TOPIC = '/islam/pg_rgb'
 PG_ODOM_TOPIC = '/islam/pg_odom'
 PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
-
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 
 # %%
@@ -82,6 +82,7 @@ ROS_DATATYPE_TO_NP = {
     7: np.float32,
     8: np.float64
 }
+
 
 def msg2pts(msg):
     # Map the msg.fields to get offsets and dtypes for x, y, z
@@ -239,7 +240,13 @@ csv_writer.writerow([
     'vlp_mean_time_ms',
     'scatter_time_ms',
     'VLP_FilteredTime_ms',
+    'sph_to_cart_pts_time_ms',
+    'filtered_publish_time_ms',
     'ZED_PC_Time_ms',
+    'depth_to_cart_time_ms',
+    'pts_to_pc_time_ms',
+    'cp_to_np_time_ms',
+    'pc_to_msg_time_ms',
     'TotalCallbackTime_ms',
     'ncutoff',  # New column
     'threshold'  # New column
@@ -256,6 +263,7 @@ def shutdown_hook():
 rospy.on_shutdown(shutdown_hook)
 
 # %%
+vlp_depth_p = rospy.Publisher(VLP_DEPTH_TOPIC, Image, queue_size=50)
 pg_depth_p = rospy.Publisher(PG_DEPTH_TOPIC, Image, queue_size=50)
 pg_camera_info_p = rospy.Publisher(PG_CAMERA_INFO_TOPIC, CameraInfo, queue_size=50)
 pg_rgb_p = rospy.Publisher(PG_RGB_TOPIC, Image, queue_size=50)
@@ -271,7 +279,10 @@ ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img_init, "32FC1")).shape
 # --- Store ZED's initial frame_id ---
 zed_depth_frame_id = 'map'  # zed_img_init.header.frame_id
 rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
-# ------------------------------------
+
+
+cp_to_np_time_ms = 0
+pc_to_msg_time_ms = 0
 
 # %% Subscriber and Synchronizer Setup
 
@@ -291,7 +302,7 @@ def synchronized_callback(
     :param pg_odom_msg:
     :return:
     """
-    global processing_times, frame_counter, last_report_time
+    global processing_times, frame_counter, last_report_time, cp_to_np_time_ms, pc_to_msg_time_ms
 
     rospy.loginfo("synchronized_callback")
 
@@ -334,15 +345,28 @@ def synchronized_callback(
     vlp_preproc_end_time = time.time()
     vlp_preproc_time_ms = (vlp_preproc_end_time - vlp_preproc_start_time) * 1000
 
-    # %%  Publish filtered vlp point cloud
+    # %% Publish VLP depth image
+    # Publish Image
+    vlp_depth_msg = bridge.cv2_to_imgmsg(vlp_depth.get())
+    vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
+    vlp_depth_p.publish(vlp_depth_msg)
+    rospy.logwarn("vlp_depth published")
+
+    # %% Publish filtered vlp point cloud
     vlp_filtered_start_time = time.time()
+    sph_to_cart_pts_time_ms = 0
+    filtered_publish_time_ms = 0
 
     if len(vlp_sph_pts) > 0:  # Ensure there are points to publish
-        # Convert filtered spherical points back to Cartesian for publishing
+        # %% Convert filtered spherical points back to Cartesian for publishing
+        sph_to_cart_pts_start_time = time.time()
         vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
         vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get()  # CuPy to NumPy
+        sph_to_cart_pts_end_time = time.time()
+        sph_to_cart_pts_time_ms = (sph_to_cart_pts_end_time - sph_to_cart_pts_start_time) * 1000
 
-        # Create PointCloud2 message for filtered VLP
+        # %% Create PointCloud2 message for filtered VLP
+        filtered_publish_start_time = time.time()
         header = vlp_pc_msg.header  # Use original VLP header for frame_id and timestamp
         header.frame_id = zed_depth_frame_id
         # It's crucial that the frame_id of this point cloud matches the frame_id of your ZED camera.
@@ -358,6 +382,9 @@ def synchronized_callback(
         ]
         vlp_filtered_pc_msg = pc2.create_cloud(header, fields, vlp_filtered_cart_pts_np)
         vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
+        filtered_publish_end_time = time.time()
+        filtered_publish_time_ms = (filtered_publish_end_time - filtered_publish_start_time) * 1000
+
         rospy.logdebug("vlp_filtered_pc_p.publish")
 
     vlp_filtered_end_time = time.time()
@@ -365,17 +392,29 @@ def synchronized_callback(
 
     # %% ZED Preproc
     zed_depth = cp.array(bridge.imgmsg_to_cv2(zed_img_msg, "32FC1"))
-    zed_depth[cp.isnan(zed_depth)] = vlp_mean
-    zed_depth[zed_depth > 20] = vlp_mean
 
-    # Sensor Fusion
+    # Create mask for NaNs and out-of-range values
+    mask_nan = cp.isnan(zed_depth)
+    mask_far = zed_depth > 20
+
+    # Combine masks
+    filled_mask = mask_nan | mask_far
+
+    # Create filled version of the depth image
+    zed_depth_filled = zed_depth.copy()
+    zed_depth_filled[filled_mask] = vlp_mean
+
+    # %% Sensor Fusion
     fusion_start_time = time.time()  # Start timing only the fusion part
-    pg_depth = pg(zed_depth.copy(), vlp_depth.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
+    pg_depth = pg(zed_depth_filled.copy(), vlp_depth.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
     fusion_end_time = time.time()  # End timing fusion part
     fusion_time_ms = (fusion_end_time - fusion_start_time) * 1000
 
     processing_times.append(fusion_time_ms)
     frame_counter += 1
+
+    # Remove filled pixels
+    pg_depth[filled_mask] = cp.nan
 
     # Publish Image
     pg_depth_msg = bridge.cv2_to_imgmsg(pg_depth.get())
@@ -390,79 +429,95 @@ def synchronized_callback(
     # If not, you might publish it less frequently or only for debugging.
 
     zed_pc_start_time = time.time()
+    depth_to_cart_time_ms = 0
+    pts_to_pc_time_ms = 0
 
-    # # Ensure pg_camera_info_msg has valid data before proceeding
-    # if pg_camera_info_msg.K and pg_camera_info_msg.P:
-    #     def depth_to_cart_pts(depth, camera_info_msg):
-    #         # Get camera intrinsics from CameraInfo message
-    #         fx = camera_info_msg.K[0]
-    #         fy = camera_info_msg.K[4]
-    #         cx = camera_info_msg.K[2]
-    #         cy = camera_info_msg.K[5]
-    #
-    #         # Convert depth image to point cloud
-    #         rows, cols = depth.shape
-    #         u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
-    #
-    #         # CuPy operations for point cloud generation
-    #         Z = depth
-    #         X = (u - cx) * Z / fx
-    #         Y = (v - cy) * Z / fy
-    #
-    #         # Stack into N x 3 points
-    #         cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
-    #
-    #         # Filter out invalid points (e.g., where Z is 0 or NaN)
-    #         valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
-    #
-    #         # Apply the rotation:
-    #         # New X (forward) = Old Z_camera
-    #         # New Y (left)    = Old (-X_camera)
-    #         # New Z (up)      = Old (-Y_camera)
-    #         cart_pts = cp.stack((Z, -X, -Y), axis=-1).reshape(-1, 3)
-    #
-    #         cart_pts = cart_pts[valid_mask]
-    #         return cart_pts
-    #
-    #     fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
-    #     zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
-    #
-    #     def cart_pts_to_pc_msg(cart_pts, header):
-    #         # Convert CuPy array to NumPy for pc2.create_cloud
-    #         cart_pts_np = cart_pts.get()
-    #
-    #         fields = [
-    #             pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
-    #             pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
-    #             pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
-    #         ]
-    #         pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
-    #         return pc_msg
-    #
-    #     # Create PointCloud2 message
-    #     header = zed_img_msg.header
-    #     header.frame_id = zed_depth_frame_id  # pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
-    #
-    #     pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
-    #     zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
-    #
-    #     pg_fused_pc_p.publish(pg_fused_pc_msg)
-    #     zed_pc_p.publish(zed_pc_msg)
-    #     rospy.loginfo("publish_pg")
-    # else:
-    #     rospy.logwarn("CameraInfo not received yet or invalid, skipping fused point cloud publication.")
-    #     rospy.logwarn_throttle(5, "CameraInfo not received yet or invalid, skipping fused point cloud publication.")
+    # Ensure pg_camera_info_msg has valid data before proceeding
+    if pg_camera_info_msg.K and pg_camera_info_msg.P:
+        def depth_to_cart_pts(depth, camera_info_msg):
+            # Get camera intrinsics from CameraInfo message
+            fx = camera_info_msg.K[0]
+            fy = camera_info_msg.K[4]
+            cx = camera_info_msg.K[2]
+            cy = camera_info_msg.K[5]
+
+            # Convert depth image to point cloud
+            rows, cols = depth.shape
+            u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
+
+            # CuPy operations for point cloud generation
+            Z = depth
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
+
+            # Stack into N x 3 points
+            # cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+
+            # Filter out invalid points (e.g., where Z is 0 or NaN)
+            valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
+
+            # Apply the rotation:
+            # New X (forward) = Old Z_camera
+            # New Y (left)    = Old (-X_camera)
+            # New Z (up)      = Old (-Y_camera)
+            cart_pts = cp.stack((Z, -X, -Y), axis=-1).reshape(-1, 3)
+
+            cart_pts = cart_pts[valid_mask]
+            return cart_pts
+
+        depth_to_cart_start_time = time.time()
+        fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
+        zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+        depth_to_cart_end_time = time.time()
+        depth_to_cart_time_ms = (depth_to_cart_end_time - depth_to_cart_start_time) * 1000
+
+        def cart_pts_to_pc_msg(cart_pts, header):
+            # Convert CuPy array to NumPy for pc2.create_cloud
+            global cp_to_np_time_ms, pc_to_msg_time_ms
+            cp_to_np_start_time = time.time()
+            cart_pts_np = cart_pts.get()
+            cp_to_np_end_time = time.time()
+            cp_to_np_time_ms = (cp_to_np_end_time - cp_to_np_start_time) * 1000
+
+            fields = [
+                pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+                pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+                pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+            ]
+
+            pc_to_msg_start_time = time.time()
+            pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
+            pc_to_msg_end_time = time.time()
+            pc_to_msg_time_ms = (pc_to_msg_end_time - pc_to_msg_start_time) * 1000
+            return pc_msg
+
+        # Create PointCloud2 message
+        header = zed_img_msg.header
+        header.frame_id = zed_depth_frame_id  # pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
+
+        pts_to_pc_start_time = time.time()
+        pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
+        zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
+        pts_to_pc_end_time = time.time()
+        pts_to_pc_time_ms = (pts_to_pc_end_time - pts_to_pc_start_time) * 1000
+
+        pg_fused_pc_p.publish(pg_fused_pc_msg)
+        zed_pc_p.publish(zed_pc_msg)
+        rospy.loginfo("publish_pg")
+    else:
+        rospy.logwarn("CameraInfo not received yet or invalid, skipping fused point cloud publication.")
+        rospy.logwarn_throttle(5, "CameraInfo not received yet or invalid, skipping fused point cloud publication.")
 
     zed_pc_end_time = time.time()
     zed_pc_time_ms = (zed_pc_end_time - zed_pc_start_time) * 1000
 
     # %% Publish aux info
-    # pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
-    # pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
-    # pg_odom_msg.header.stamp = zed_img_msg.header.stamp
-    # pg_rgb_p.publish(pg_rgb_msg)
-    # pg_camera_info_p.publish(pg_camera_info_msg)
-    # pg_odom_p.publish(pg_odom_msg)
+    pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
+    pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
+    pg_odom_msg.header.stamp = zed_img_msg.header.stamp
+    pg_rgb_p.publish(pg_rgb_msg)
+    pg_camera_info_p.publish(pg_camera_info_msg)
+    pg_odom_p.publish(pg_odom_msg)
     rospy.loginfo("pg_odom published")
 
     # End timing for the entire zed_callback processing
@@ -481,7 +536,13 @@ def synchronized_callback(
         vlp_mean_time_ms,
         scatter_time_ms,
         vlp_filtered_time_ms,
+        sph_to_cart_pts_time_ms,
+        filtered_publish_time_ms,
         zed_pc_time_ms,
+        depth_to_cart_time_ms,
+        pts_to_pc_time_ms,
+        cp_to_np_time_ms,
+        pc_to_msg_time_ms,
         total_processing_time_ms,
         CURRENT_NCUTOFF,  # Log ncutoff
         CURRENT_THRESHOLD  # Log threshold
