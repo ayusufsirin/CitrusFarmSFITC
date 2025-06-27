@@ -34,6 +34,8 @@ PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 
+rospy.set_param('/use_sim_time', True)
+
 # %%
 # ZED_V = 376
 # ZED_H = 672
@@ -612,8 +614,9 @@ odom_sub = message_filters.Subscriber(LOAM_ODOM_TOPIC, Odometry)
 ats = message_filters.ApproximateTimeSynchronizer(
     [depth_sub, vlp_sub, rgb_sub, cam_info_sub, odom_sub],
     # [rgb_sub, cam_info_sub],
-    queue_size=1,  # Adjust as needed
-    slop=0.1
+    queue_size=10,  # Adjust as needed
+    slop=0.1,
+    reset=True
 )
 
 # Register the synchronized callback
