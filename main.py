@@ -8,6 +8,7 @@ import time
 import cupy as cp
 import cupyx as cpx
 import cv2
+import matplotlib.pyplot as plt
 import message_filters
 import numpy as np
 import rospy
@@ -33,8 +34,6 @@ PG_ODOM_TOPIC = '/islam/pg_odom'
 PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
-
-rospy.set_param('/use_sim_time', True)
 
 # %%
 # ZED_V = 376
@@ -235,6 +234,7 @@ def create_cloud_from_np(header, fields, np_array):
 # %%
 rospy.init_node('sf', anonymous=True)
 rospy.set_param('/rosgraph/log_level', logging.DEBUG)
+rospy.set_param('/use_sim_time', True)
 
 # Global variables for performance logging
 processing_times = []
@@ -596,6 +596,21 @@ def synchronized_callback(
         processing_times = []  # Reset for the next interval
         frame_counter = 0
         last_report_time = current_time
+
+    # --- DEBUG PLOTTING SECTION ---
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    axs[0].imshow(zed_depth.get(), cmap='plasma')
+    axs[0].set_title("ZED Depth (Original)")
+    axs[1].imshow(vlp_depth.get(), cmap='inferno')
+    axs[1].set_title("VLP Depth")
+    axs[2].imshow(pg_depth.get(), cmap='viridis')
+    axs[2].set_title("Fused PG Depth")
+
+    for ax in axs:
+        ax.axis('off')
+
+    plt.tight_layout()
+    plt.show()  # <-- This blocks until you close the plot window
 
 
 # Create message_filters subscribers
