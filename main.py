@@ -297,6 +297,7 @@ pg_odom_p = rospy.Publisher(PG_ODOM_TOPIC, Odometry, queue_size=10)
 pg_fused_pc_p = rospy.Publisher(PG_FUSED_PC_TOPIC, PointCloud2, queue_size=10)
 zed_pc_p = rospy.Publisher(ZED_PC_TOPIC, PointCloud2, queue_size=10)
 vlp_filtered_pc_p = rospy.Publisher(VLP_FILTERED_PC_TOPIC, PointCloud2, queue_size=10)
+vlp_debug_pc_p = rospy.Publisher(VLP_DEBUG_PC_TOPIC, PointCloud2, queue_size=10)
 
 bridge = CvBridge()
 
@@ -336,6 +337,55 @@ def synchronized_callback(
     total_start_time = time.time()
 
     # %% VLP Preproc
+    def cart_pts_to_depth_image(cart_pts, camera_info_msg, image_shape):
+        """
+        Vectorized projection of 3D points to a depth image using camera intrinsics.
+        Args:
+            cart_pts: CuPy array (N, 3), in camera frame with X=forward
+            camera_info_msg: sensor_msgs/CameraInfo
+            image_shape: (H, W)
+        Returns:
+            depth_image: CuPy array (H, W) with float32 values
+        """
+
+        fx = camera_info_msg.K[0]
+        fy = camera_info_msg.K[4]
+        cx = camera_info_msg.K[2]
+        cy = camera_info_msg.K[5]
+
+        # Convert from your axis convention (New X = Old Z_camera, etc.)
+        Z = cart_pts[:, 0]
+        X = -cart_pts[:, 1]
+        Y = -cart_pts[:, 2]
+
+        # Image coordinates
+        u = cp.round((X * fx) / Z + cx).astype(cp.int32)
+        v = cp.round((Y * fy) / Z + cy).astype(cp.int32)
+
+        H, W = image_shape
+        valid = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (Z > 0) & cp.isfinite(Z)
+        u = u[valid]
+        v = v[valid]
+        Z = Z[valid]
+
+        # Compute flat indices for fast scatter
+        flat_idx = v * W + u
+        sorted_idx = cp.argsort(flat_idx)
+
+        flat_idx = flat_idx[sorted_idx]
+        Z_sorted = Z[sorted_idx]
+
+        # Find first occurrence of each (u, v)
+        unique_idx, first_pos = cp.unique(flat_idx, return_index=True)
+        Z_min = Z_sorted[first_pos]
+
+        # Reconstruct 2D depth image
+        depth_img_flat = cp.full(H * W, cp.nan, dtype=cp.float32)
+        depth_img_flat[unique_idx] = Z_min
+        depth_img = depth_img_flat.reshape(H, W)
+
+        return depth_img
+
     vlp_preproc_start_time = time.time()
 
     msg_to_pts_start_time = time.time()
@@ -351,9 +401,9 @@ def synchronized_callback(
     remap_start_time = time.time()
     mask = (vlp_sph_pts_raw[:, 2] < ZED_H_ANGLE / 2) & (vlp_sph_pts_raw[:, 2] > -ZED_H_ANGLE / 2)
     vlp_sph_pts = vlp_sph_pts_raw[mask]
-    r, theta, phi = vlp_sph_pts.T
-    theta = remap(theta, -LiDAR_ANGLE / 2, LiDAR_ANGLE / 2, 3 * ZED_V // 4, ZED_V // 4).astype(cp.int32)
-    phi = remap(phi, ZED_V_ANGLE / 2, -ZED_V_ANGLE / 2, 0, ZED_H).astype(cp.int32)
+    # r, theta, phi = vlp_sph_pts.T
+    # theta = remap(theta, -LiDAR_ANGLE / 2, LiDAR_ANGLE / 2, 3 * ZED_V // 4, ZED_V // 4).astype(cp.int32)
+    # phi = remap(phi, ZED_V_ANGLE / 2, -ZED_V_ANGLE / 2, 0, ZED_H).astype(cp.int32)
     remap_end_time = time.time()
     remap_time_ms = (remap_end_time - remap_start_time) * 1000
 
@@ -363,8 +413,9 @@ def synchronized_callback(
     vlp_mean_time_ms = (vlp_mean_end_time - vlp_mean_start_time) * 1000
 
     scatter_start_time = time.time()
-    vlp_depth = cp.zeros((ZED_V, ZED_H), dtype=cp.float32)
-    cpx.scatter_add(vlp_depth, (theta, phi), r)
+    # vlp_depth = cp.zeros((ZED_V, ZED_H), dtype=cp.float32)
+    # cpx.scatter_add(vlp_depth, (theta, phi), r)
+    vlp_depth = cart_pts_to_depth_image(vlp_pts, pg_camera_info_msg, (ZED_V, ZED_H))
     scatter_end_time = time.time()
     scatter_time_ms = (scatter_end_time - scatter_start_time) * 1000
 
@@ -495,6 +546,7 @@ def synchronized_callback(
         depth_to_cart_start_time = time.time()
         fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
         zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+        vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
         depth_to_cart_end_time = time.time()
         depth_to_cart_time_ms = (depth_to_cart_end_time - depth_to_cart_start_time) * 1000
 
@@ -526,11 +578,13 @@ def synchronized_callback(
         pts_to_pc_start_time = time.time()
         pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
         zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
+        vlp_pc_msg = cart_pts_to_pc_msg(vlp_cart_pts, header)
         pts_to_pc_end_time = time.time()
         pts_to_pc_time_ms = (pts_to_pc_end_time - pts_to_pc_start_time) * 1000
 
         pg_fused_pc_p.publish(pg_fused_pc_msg)
         zed_pc_p.publish(zed_pc_msg)
+        vlp_debug_pc_p.publish(vlp_pc_msg)
         rospy.loginfo("publish_pg")
     else:
         rospy.logwarn("CameraInfo not received yet or invalid, skipping fused point cloud publication.")
