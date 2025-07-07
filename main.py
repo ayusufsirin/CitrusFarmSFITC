@@ -34,6 +34,7 @@ PG_ODOM_TOPIC = '/islam/pg_odom'
 PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
+VLP_DEBUG_PC_TOPIC = "/islam/vlp_debug_pointcloud"
 
 # %%
 # ZED_V = 376
