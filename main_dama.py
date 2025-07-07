@@ -485,7 +485,7 @@ def synchronized_callback(
     # ---------- parameters ----------
     img_size = zed_depth.shape  # overall image size  (rows, cols)
     square_px = 400  # width/height of one square in pixels
-    colors = (4, 5)  # (dark, light) values – 0/255 gives black/white
+    colors = (4, 6)  # (dark, light) values – 0/255 gives black/white
     # --------------------------------
 
     # Build row/column index grids on the GPU
@@ -497,6 +497,8 @@ def synchronized_callback(
     # Map to chosen grayscale levels
     x = cp.where(checker, colors[1], colors[0]).astype(cp.float32)  # stays on GPU
 
+    x -= 2
+
     m = 25  # downsampling coefficient
     y = x[::m, ::m]  # input LR image
 
@@ -506,10 +508,10 @@ def synchronized_callback(
     z_display[::m, ::m] = y
 
     # --- assume img_gpu from previous snippet exists ---
-    sigma = 0.1  # standard deviation (0–255 scale)
+    sigma = 0.5  # standard deviation (0–255 scale)
     noise = cp.random.normal(0, sigma, x.shape).astype(cp.float32)
 
-    x_n = cp.clip(x + noise, 0, 10).astype(cp.float32)
+    x_n = cp.clip(x + noise, 0, 20).astype(cp.float32)
 
     zed_depth = x_n
     vlp_depth = z
