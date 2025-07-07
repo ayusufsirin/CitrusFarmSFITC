@@ -175,9 +175,7 @@ def lpf(img, ncutoff):
 
 
 def pg(zed_depth, vlp_depth, ncutoff, threshold=100):
-    ncutoff = ncutoff / 10
-
-    mask = vlp_depth > 0
+    mask = ~cp.isnan(vlp_depth)
     filtered = zed_depth
     filtered[mask] = vlp_depth[mask]
 
