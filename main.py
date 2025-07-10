@@ -40,6 +40,9 @@ CURRENT_NCUTOFF = 0.4
 CURRENT_THRESHOLD = 10
 MORTAL_ROWS_TOP = 320
 MORTAL_ROWS_BOTTOM = 320
+MORTAL_COLUMNS_LEFT = 50
+MORTAL_COLUMNS_RIGHT = 50
+ZED_VLP_DIFF_MAX = 1.0
 
 # %%
 # ZED_V = 376
@@ -501,27 +504,27 @@ def synchronized_callback(
     # %% Sensor Fusion
     fusion_start_time = time.time()  # Start timing only the fusion part
 
-    zed_depth_cropped = zed_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, :].copy()
-    vlp_depth_cropped = vlp_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, :].copy()
+    zed_depth_cropped = zed_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
+    vlp_depth_cropped = vlp_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
 
     pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
 
     zed_depth = cp.pad(
         zed_depth_cropped,
-        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
         mode='constant',
         constant_values=cp.nan
     )
     vlp_depth = cp.pad(
         vlp_depth_cropped,
-        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
         mode='constant',
         constant_values=cp.nan
     )
 
     pg_depth = cp.pad(
         pg_depth_cropped,
-        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
         mode='constant',
         constant_values=cp.nan
     )
