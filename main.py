@@ -44,14 +44,20 @@ MORTAL_COLUMNS_LEFT = 50
 MORTAL_COLUMNS_RIGHT = 50
 ZED_VLP_DIFF_MAX = 1.0
 
-# %%
+# %% Hardware specs
+# TODO: Check real specs
+
 # ZED_V = 376
 # ZED_H = 672
 ZED_H_ANGLE = 102
 ZED_V_ANGLE = 56
+ZED_MAX = 20
+ZED_MIN = 0
 
 LiDAR_V = 16
 LiDAR_ANGLE = 30.2  # 0.2 degree precaution TODO: Check if precaution is required and proper
+LIDAR_MAX = 40
+LIDAR_MIN = 0.5
 
 
 # %%
@@ -497,8 +503,7 @@ def synchronized_callback(
     # Create filled version of the depth image
     zed_depth = zed_depth.copy()
     zed_depth = inpaint_depth_opencv(zed_depth)
-    # TODO: Max value of ZED?
-    zed_depth[~cp.isfinite(zed_depth)] = 40
+    zed_depth[~cp.isfinite(zed_depth)] = ZED_MAX
     # zed_depth[filled_mask] = 40
 
     # %% Sensor Fusion
