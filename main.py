@@ -236,6 +236,21 @@ def create_cloud_from_np(header, fields, np_array):
 
 
 # %%
+def inpaint_depth_opencv(cu_img):
+    img = cu_img.get()
+    mask = ~np.isfinite(img)
+
+    # OpenCV needs 8-bit single-channel mask
+    mask = mask.astype(np.uint8) * 255
+
+    # Normalize for OpenCV (must be 8-bit or float32)
+    img32 = img.astype(np.float32)
+
+    inpainted = cv2.inpaint(img32, mask, inpaintRadius=3, flags=cv2.INPAINT_NS)
+
+    return cp.asarray(inpainted)
+
+# %%
 rospy.init_node('sf', anonymous=True)
 rospy.set_param('/rosgraph/log_level', logging.DEBUG)
 rospy.set_param('/use_sim_time', True)
@@ -470,19 +485,47 @@ def synchronized_callback(
     zed_depth = cp.array(bridge.imgmsg_to_cv2(zed_img_msg, "32FC1"))
 
     # Create mask for NaNs and out-of-range values
-    mask_nan = cp.isnan(zed_depth)
-    mask_far = zed_depth > 20
+    mask_nan_zed = cp.isnan(zed_depth)
+    mask_inf_zed = cp.isinf(zed_depth)
 
     # Combine masks
-    filled_mask = mask_nan | mask_far
+    filled_mask = mask_nan_zed | mask_inf_zed
 
     # Create filled version of the depth image
-    zed_depth_filled = zed_depth.copy()
-    zed_depth_filled[filled_mask] = vlp_mean
+    zed_depth = zed_depth.copy()
+    zed_depth = inpaint_depth_opencv(zed_depth)
+    # TODO: Max value of ZED?
+    zed_depth[~cp.isfinite(zed_depth)] = 40
+    # zed_depth[filled_mask] = 40
 
     # %% Sensor Fusion
     fusion_start_time = time.time()  # Start timing only the fusion part
-    pg_depth = pg(zed_depth_filled.copy(), vlp_depth.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
+
+    zed_depth_cropped = zed_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, :].copy()
+    vlp_depth_cropped = vlp_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, :].copy()
+
+    pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
+
+    zed_depth = cp.pad(
+        zed_depth_cropped,
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        mode='constant',
+        constant_values=cp.nan
+    )
+    vlp_depth = cp.pad(
+        vlp_depth_cropped,
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        mode='constant',
+        constant_values=cp.nan
+    )
+
+    pg_depth = cp.pad(
+        pg_depth_cropped,
+        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (0, 0)),  # pad only at the bottom
+        mode='constant',
+        constant_values=cp.nan
+    )
+
     fusion_end_time = time.time()  # End timing fusion part
     fusion_time_ms = (fusion_end_time - fusion_start_time) * 1000
 
