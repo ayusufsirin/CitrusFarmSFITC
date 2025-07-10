@@ -6,9 +6,8 @@ import time
 
 # %%
 import cupy as cp
-import cupyx as cpx
+import cupyx.scipy.ndimage
 import cv2
-import matplotlib.pyplot as plt
 import message_filters
 import numpy as np
 import rospy
@@ -35,6 +34,12 @@ PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 VLP_DEBUG_PC_TOPIC = "/islam/vlp_debug_pointcloud"
+
+# %% Algorithm parameters
+CURRENT_NCUTOFF = 0.4
+CURRENT_THRESHOLD = 10
+MORTAL_ROWS_TOP = 320
+MORTAL_ROWS_BOTTOM = 320
 
 # %%
 # ZED_V = 376
@@ -241,12 +246,6 @@ frame_counter = 0
 last_report_time = time.time()
 report_interval_frames = 100  # Report every 100 frames
 report_interval_seconds = 5  # Report every 5 seconds
-
-# --- ALGORITHM PARAMETERS TO BE LOGGED ---
-CURRENT_NCUTOFF = 0.1  # Example value, you will change this
-CURRENT_THRESHOLD = 1  # Example value, you will change this
-# You can add more parameters here if needed, e.g., LiDAR filtering range, etc.
-# ----------------------------------------
 
 # CSV logging setup
 log_dir = os.path.expanduser("./logs")  # Log to user's home directory
