@@ -6,7 +6,6 @@ import time
 
 # %%
 import cupy as cp
-import cupyx.scipy.ndimage
 import cv2
 import message_filters
 import numpy as np
@@ -258,6 +257,7 @@ def inpaint_depth_opencv(cu_img):
     inpainted = cv2.inpaint(img32, mask, inpaintRadius=3, flags=cv2.INPAINT_NS)
 
     return cp.asarray(inpainted)
+
 
 # %%
 rospy.init_node('sf', anonymous=True)
@@ -512,8 +512,17 @@ def synchronized_callback(
     zed_depth_cropped = zed_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
     vlp_depth_cropped = vlp_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
 
+    # %% Ignore too much standard deviations
+    """
+    This part of code is required to eliminate VLP point with too much deviations from the ZED frame. Because the
+    ZED frame have smooth plate regions on it, the VLP jumps cause spikes when LP filtered on the PG algorithm.
+    """
+    vlp_depth_cropped[cp.abs(zed_depth_cropped - vlp_depth_cropped) > ZED_VLP_DIFF_MAX] = cp.nan
+
+    # %% PG
     pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
 
+    # Zero padding
     zed_depth = cp.pad(
         zed_depth_cropped,
         ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
