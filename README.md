@@ -1,5 +1,26 @@
 # SFITC
 
+## Algorithm
+
+```mermaid
+graph LR
+    Odom --> Cumulator;
+    VLP -- Point Cloud --> Cumulator;
+    Cumulator -- Cumulated VLP --> SphericalFilter;
+    SphericalFilter -- VLP on ZED FOV --> DepthConverter;
+    DepthConverter -- Depth Image --> Cropper;
+    ZED -- Depth Image --> Inpainter;
+    Inpainter -- Inpainted ZED --> Cropper;
+    Cropper -- Cropped VLP --> VarianceFilter;
+    Cropper -- Cropped ZED --> VarianceFilter;
+    Cropper -- Cropped ZED --> PG;
+    VarianceFilter -- Filtered VLP --> PG;
+    
+    subgraph LidarUpsample 
+        Cumulator
+    end
+```
+
 ## Start ROS Core:
 
 ```bash
