@@ -31,17 +31,20 @@ PG_RGB_TOPIC = '/islam/pg_rgb'
 PG_ODOM_TOPIC = '/islam/pg_odom'
 PG_FUSED_PC_TOPIC = "/islam/pg_fused_pointcloud"
 ZED_PC_TOPIC = "/islam/zed_pointcloud"
+ZED_ORIGINAL_PC_TOPIC = "/islam/zed_original_pointcloud"
 VLP_FILTERED_PC_TOPIC = "/islam/vlp_filtered_pointcloud"
 VLP_DEBUG_PC_TOPIC = "/islam/vlp_debug_pointcloud"
 
 # %% Algorithm parameters
-CURRENT_NCUTOFF = 0.4
-CURRENT_THRESHOLD = 10
-MORTAL_ROWS_TOP = 320
-MORTAL_ROWS_BOTTOM = 320
-MORTAL_COLUMNS_LEFT = 50
-MORTAL_COLUMNS_RIGHT = 50
-ZED_VLP_DIFF_MAX = 1.0
+CURRENT_NCUTOFF = 0.16
+CURRENT_NCUTOFF_L = 0.08
+CURRENT_NCUTOFF_H = 0.08
+CURRENT_THRESHOLD = 33
+MORTAL_ROWS_TOP = 250 # 0  # 250
+MORTAL_ROWS_BOTTOM = 320 # 20  # 320
+MORTAL_COLUMNS_LEFT = 70 # 500  # 70
+MORTAL_COLUMNS_RIGHT = 10 # 80  # 10
+ZED_VLP_DIFF_MAX = 50.0
 
 # %% Hardware specs
 # TODO: Check real specs
@@ -158,6 +161,45 @@ def depth_to_sph_pts(depth):
 
 
 # %%
+
+lpf_mask = None
+
+def brick_wall_lpf_mask(shape, ncutoff):
+    # Create a circular mask of the same size as the spectrum
+    rows, cols = shape
+    crow, ccol = rows // 2, cols // 2
+
+    y = cp.arange(rows, dtype=cp.int32) - crow
+    x = cp.arange(cols, dtype=cp.int32) - ccol
+    Y, X = cp.meshgrid(y, x, indexing="ij")
+    r2 = (X / (ccol * ncutoff)) ** 2 + (Y / (crow * ncutoff)) ** 2
+    mask = (r2 <= 1.0)
+    lpf_mask = mask.astype(cp.float32)
+    return lpf_mask
+
+
+def butterworth_lpf_mask(shape, D0, n=2):
+    rows, cols = shape
+    crow, ccol = rows // 2, cols // 2
+    y = cp.arange(rows) - crow
+    x = cp.arange(cols) - ccol
+    Y, X = cp.meshgrid(y, x, indexing="ij")
+    D = cp.sqrt((Y / crow)**2 + (X / ccol)**2)
+    H = 1 / (1 + (D / D0)**(2 * n))
+    return H.astype(cp.float32)
+
+
+def gaussian_lpf_mask(shape, sigma):
+    rows, cols = shape
+    crow, ccol = rows // 2, cols // 2
+    y = cp.arange(rows) - crow
+    x = cp.arange(cols) - ccol
+    Y, X = cp.meshgrid(y, x, indexing="ij")
+    D2 = (Y / crow)**2 + (X / ccol)**2
+    H = cp.exp(-D2 / (2 * sigma**2))
+    return H.astype(cp.float32)
+
+
 def lpf(img, ncutoff):
     # Apply 2D FFT to the image
     f = cp.fft.fft2(img)
@@ -165,18 +207,14 @@ def lpf(img, ncutoff):
     # Shift the zero frequency component to the center of the spectrum
     fshift = cp.fft.fftshift(f)
 
-    # Create a circular mask of the same size as the spectrum
-    rows, cols = img.shape
-    crow, ccol = rows // 2, cols // 2
-    mask = np.zeros((rows, cols), np.uint8)
-    cutoff = int(min(crow, ccol) * ncutoff)
-    cv2.circle(mask, (ccol, crow), cutoff, 1, -1)
-    # cv2.ellipse(mask, (ccol, crow), (1, 2) * cutoff, 0, 0, 360,  1, -1)
-
-    mask = cp.asarray(mask)
+    global lpf_mask
+    if lpf_mask is None:
+        # lpf_mask = brick_wall_lpf_mask(img.shape, ncutoff)
+        # lpf_mask = butterworth_lpf_mask(img.shape, D0=ncutoff, n=3)
+        lpf_mask = gaussian_lpf_mask(img.shape, sigma=ncutoff)
 
     # Apply the mask to the shifted spectrum
-    fshift_filtered = fshift * mask
+    fshift_filtered = fshift * lpf_mask
 
     # Shift the zero frequency component back to the corner of the spectrum
     f_filtered = cp.fft.ifftshift(fshift_filtered)
@@ -188,14 +226,55 @@ def lpf(img, ncutoff):
     return img_filtered
 
 
-def pg(zed_depth, vlp_depth, ncutoff, threshold=100):
+brf_mask = None
+
+
+def brf(img, low_cutoff, high_cutoff):
+    # Apply 2D FFT to the image
+    f = cp.fft.fft2(img)
+
+    # Shift the zero frequency component to the center of the spectrum
+    fshift = cp.fft.fftshift(f)
+
+    global brf_mask
+    if brf_mask is None:
+        # Create a circular mask of the same size as the spectrum
+        rows, cols = img.shape
+        crow, ccol = rows // 2, cols // 2
+        y = cp.arange(rows) - crow
+        x = cp.arange(cols) - ccol
+        Y, X = cp.meshgrid(y, x, indexing="ij")
+        nx = ccol * low_cutoff
+        ny = crow * low_cutoff
+        lo = (X / nx) ** 2 + (Y / ny) ** 2 <= 1.0  # inner ellipse
+        nx = ccol * high_cutoff
+        ny = crow * high_cutoff
+        hi = (X / nx) ** 2 + (Y / ny) ** 2 <= 1.0  # outer ellipse
+        passband = lo | ~hi  # keep < low  OR  > high
+        brf_mask = passband.astype(cp.float32)
+
+    # Apply the mask to the shifted spectrum
+    fshift_filtered = fshift * brf_mask
+
+    # Shift the zero frequency component back to the corner of the spectrum
+    f_filtered = cp.fft.ifftshift(fshift_filtered)
+
+    # Apply the inverse 2D FFT to the filtered spectrum
+    img_filtered = cp.fft.ifft2(f_filtered)
+    img_filtered = cp.real(img_filtered)
+
+    return img_filtered
+
+
+def pg(zed_depth, vlp_depth, threshold=100):
     mask = ~cp.isnan(vlp_depth)
     filtered = zed_depth
-    filtered[mask] = vlp_depth[mask]
+    # filtered[mask] = vlp_depth[mask]
 
     while threshold > 0:
-        filtered = lpf(filtered, ncutoff)
         filtered[mask] = vlp_depth[mask]
+        filtered = lpf(filtered, CURRENT_NCUTOFF)
+        # filtered = brf(filtered, 0.0, 0.01)
 
         threshold -= 1
 
@@ -318,6 +397,7 @@ pg_rgb_p = rospy.Publisher(PG_RGB_TOPIC, Image, queue_size=50)
 pg_odom_p = rospy.Publisher(PG_ODOM_TOPIC, Odometry, queue_size=10)
 pg_fused_pc_p = rospy.Publisher(PG_FUSED_PC_TOPIC, PointCloud2, queue_size=10)
 zed_pc_p = rospy.Publisher(ZED_PC_TOPIC, PointCloud2, queue_size=10)
+zed_original_pc_p = rospy.Publisher(ZED_ORIGINAL_PC_TOPIC, PointCloud2, queue_size=10)
 vlp_filtered_pc_p = rospy.Publisher(VLP_FILTERED_PC_TOPIC, PointCloud2, queue_size=10)
 vlp_debug_pc_p = rospy.Publisher(VLP_DEBUG_PC_TOPIC, PointCloud2, queue_size=10)
 
@@ -444,13 +524,6 @@ def synchronized_callback(
     vlp_preproc_end_time = time.time()
     vlp_preproc_time_ms = (vlp_preproc_end_time - vlp_preproc_start_time) * 1000
 
-    # %% Publish VLP depth image
-    # Publish Image
-    vlp_depth_msg = bridge.cv2_to_imgmsg(vlp_depth.get())
-    vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
-    vlp_depth_p.publish(vlp_depth_msg)
-    rospy.logwarn("vlp_depth published")
-
     # %% Publish filtered vlp point cloud
     vlp_filtered_start_time = time.time()
     sph_to_cart_pts_time_ms = 0
@@ -491,17 +564,58 @@ def synchronized_callback(
     vlp_filtered_time_ms = (vlp_filtered_end_time - vlp_filtered_start_time) * 1000
 
     # %% ZED Preproc
-    zed_depth = cp.array(bridge.imgmsg_to_cv2(zed_img_msg, "32FC1"))
+    zed_depth_original = cp.array(bridge.imgmsg_to_cv2(zed_img_msg, "32FC1"))
+
+    # %% Synthetic Data
+
+    if False:
+        srtrgs_start = time.time()
+        # ---------- parameters ----------
+        img_size = zed_depth_original.shape  # overall image size  (rows, cols)
+        square_px = 100  # width/height of one square in pixels
+        colors = (4, 6)  # (dark, light) values – 0/255 gives black/white
+        # --------------------------------
+
+        # Build row/column index grids on the GPU
+        rows, cols = cp.indices(img_size, dtype=cp.int32)
+
+        # Calculate which “square” each pixel belongs to, then XOR to alternate
+        checker = ((rows // square_px) ^ (cols // square_px)) & 1
+
+        # Map to chosen grayscale levels
+        x = cp.where(checker, colors[1], colors[0]).astype(cp.float32)  # stays on GPU
+
+        x -= 2
+
+        m = 25  # downsampling coefficient
+        y = x[::m, ::m]  # input LR image
+
+        z = cp.full(x.shape, fill_value=cp.nan, dtype=cp.float32)
+        z_display = cp.zeros(x.shape, dtype=cp.float32)
+        z[::m, ::m] = y
+        z_display[::m, ::m] = y
+
+        # --- assume img_gpu from previous snippet exists ---
+        sigma = 0.5  # standard deviation (0–255 scale)
+        noise = cp.random.normal(0, sigma, x.shape).astype(cp.float32)
+
+        x_n = cp.clip(x + noise, 0, 20).astype(cp.float32)
+
+        # zed_depth_original = x_n
+        zed_depth_original = x
+        vlp_depth = z + 0.1
+        srtrgs_end = time.time()
+        print(srtrgs_end - srtrgs_start)
 
     # Create mask for NaNs and out-of-range values
-    mask_nan_zed = cp.isnan(zed_depth)
-    mask_inf_zed = cp.isinf(zed_depth)
+    mask_nan_zed = cp.isnan(zed_depth_original)
+    mask_inf_zed = cp.isinf(zed_depth_original)
 
     # Combine masks
     filled_mask = mask_nan_zed | mask_inf_zed
 
     # Create filled version of the depth image
-    zed_depth = zed_depth.copy()
+    zed_depth = zed_depth_original.copy()
     zed_depth = inpaint_depth_opencv(zed_depth)
     zed_depth[~cp.isfinite(zed_depth)] = ZED_MAX
     # zed_depth[filled_mask] = 40
@@ -512,6 +626,8 @@ def synchronized_callback(
     zed_depth_cropped = zed_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
     vlp_depth_cropped = vlp_depth[MORTAL_ROWS_TOP:-MORTAL_ROWS_BOTTOM, MORTAL_COLUMNS_LEFT:-MORTAL_COLUMNS_RIGHT].copy()
 
+    print(vlp_depth_cropped.shape)
+
     # %% Ignore too much standard deviations
     """
     This part of code is required to eliminate VLP point with too much deviations from the ZED frame. Because the
@@ -520,7 +636,7 @@ def synchronized_callback(
     vlp_depth_cropped[cp.abs(zed_depth_cropped - vlp_depth_cropped) > ZED_VLP_DIFF_MAX] = cp.nan
 
     # %% PG
-    pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), ncutoff=CURRENT_NCUTOFF, threshold=CURRENT_THRESHOLD)
+    pg_depth_cropped = pg(zed_depth_cropped.copy(), vlp_depth_cropped.copy(), threshold=CURRENT_THRESHOLD)
 
     # Zero padding
     zed_depth = cp.pad(
@@ -551,12 +667,6 @@ def synchronized_callback(
 
     # Remove filled pixels
     pg_depth[filled_mask] = cp.nan
-
-    # Publish Image
-    pg_depth_msg = bridge.cv2_to_imgmsg(pg_depth.get())
-    pg_depth_msg.header.stamp = zed_img_msg.header.stamp
-    pg_depth_p.publish(pg_depth_msg)
-    rospy.logwarn("pg_depth published")
 
     # %% Convert Fused Depth to PointCloud2 and Publish
     # Need camera intrinsics for this. Assume pg_camera_info_msg is already populated.
@@ -604,6 +714,7 @@ def synchronized_callback(
         depth_to_cart_start_time = time.time()
         fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
         zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+        zed_original_cart_pts = depth_to_cart_pts(zed_depth_original, camera_info_msg=pg_camera_info_msg)
         vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
         depth_to_cart_end_time = time.time()
         depth_to_cart_time_ms = (depth_to_cart_end_time - depth_to_cart_start_time) * 1000
@@ -636,12 +747,14 @@ def synchronized_callback(
         pts_to_pc_start_time = time.time()
         pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
         zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
+        zed_original_pc_msg = cart_pts_to_pc_msg(zed_original_cart_pts, header)
         vlp_pc_msg = cart_pts_to_pc_msg(vlp_cart_pts, header)
         pts_to_pc_end_time = time.time()
         pts_to_pc_time_ms = (pts_to_pc_end_time - pts_to_pc_start_time) * 1000
 
         pg_fused_pc_p.publish(pg_fused_pc_msg)
         zed_pc_p.publish(zed_pc_msg)
+        zed_original_pc_p.publish(zed_original_pc_msg)
         vlp_debug_pc_p.publish(vlp_pc_msg)
         rospy.loginfo("publish_pg")
     else:
@@ -650,6 +763,20 @@ def synchronized_callback(
 
     zed_pc_end_time = time.time()
     zed_pc_time_ms = (zed_pc_end_time - zed_pc_start_time) * 1000
+
+    # %% Publish VLP depth image
+    # Publish Image
+    vlp_depth_msg = bridge.cv2_to_imgmsg(vlp_depth.get())
+    vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
+    vlp_depth_p.publish(vlp_depth_msg)
+    rospy.logwarn("vlp_depth published")
+
+    # %% Publish PG depth image
+    # Publish Image
+    pg_depth_msg = bridge.cv2_to_imgmsg(pg_depth.get())
+    pg_depth_msg.header.stamp = zed_img_msg.header.stamp
+    pg_depth_p.publish(pg_depth_msg)
+    rospy.logwarn("pg_depth published")
 
     # %% Publish aux info
     pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
@@ -709,20 +836,25 @@ def synchronized_callback(
         frame_counter = 0
         last_report_time = current_time
 
-    # --- DEBUG PLOTTING SECTION ---
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5))
-    axs[0].imshow(zed_depth.get(), cmap='plasma')
-    axs[0].set_title("ZED Depth (Original)")
-    axs[1].imshow(vlp_depth.get(), cmap='inferno')
-    axs[1].set_title("VLP Depth")
-    axs[2].imshow(pg_depth.get(), cmap='viridis')
-    axs[2].set_title("Fused PG Depth")
+    # # --- DEBUG PLOTTING SECTION ---
+    # fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+    # axs[0].imshow(zed_depth.get(), cmap='plasma')
+    # axs[0].set_title("ZED Depth (Original)")
+    # axs[1].imshow(vlp_depth.get(), cmap='inferno')
+    # axs[1].set_title("VLP Depth")
+    # axs[2].imshow(pg_depth.get(), cmap='viridis')
+    # axs[2].set_title("Fused PG Depth")
+    #
+    # for ax in axs:
+    #     ax.axis('off')
+    #
+    # plt.tight_layout()
+    # plt.show()  # <-- This blocks until you close the plot window
 
-    for ax in axs:
-        ax.axis('off')
-
-    plt.tight_layout()
-    plt.show()  # <-- This blocks until you close the plot window
+    # cp.save('vlp_depth.npy', vlp_depth)
+    # cp.save('zed_depth.npy', zed_depth)
+    # cp.save('pg_depth.npy', pg_depth)
+    # exit()
 
 
 # Create message_filters subscribers
