@@ -6,6 +6,7 @@ import time
 
 # %%
 import cupy as cp
+import cupyx.scipy.ndimage
 import cv2
 import message_filters
 import numpy as np
@@ -337,6 +338,30 @@ def inpaint_depth_opencv(cu_img):
 
     return cp.asarray(inpainted)
 
+def inpaint_depth_cupy_nanaware(cu_img, iterations=5):
+   img = cu_img.copy()
+   mask = ~cp.isfinite(img)
+
+   # Initialize filled image (copy, but NaNs filled with 0 just for convolution math)
+   filled = img.copy()
+   filled[mask] = 0.0
+
+   for _ in range(iterations):
+       kernel = cp.array([[0, 1, 0],
+                          [1, 0, 1],
+                          [0, 1, 0]], dtype=cp.float32)
+
+       valid = cp.isfinite(filled)
+       weight = cupyx.scipy.ndimage.convolve(valid.astype(cp.float32), kernel, mode='constant', cval=0)
+       total = cupyx.scipy.ndimage.convolve(cp.nan_to_num(filled), kernel, mode='constant', cval=0)
+
+       update = total / (weight + 1e-6)
+
+       # Update only previously masked regions
+       filled[mask] = update[mask]
+
+   return filled
+
 
 # %%
 rospy.init_node('sf', anonymous=True)
@@ -616,7 +641,8 @@ def synchronized_callback(
 
     # Create filled version of the depth image
     zed_depth = zed_depth_original.copy()
-    zed_depth = inpaint_depth_opencv(zed_depth)
+    # zed_depth = inpaint_depth_opencv(zed_depth)
+    zed_depth = inpaint_depth_cupy_nanaware(zed_depth)
     zed_depth[~cp.isfinite(zed_depth)] = ZED_MAX
     # zed_depth[filled_mask] = 40
 
