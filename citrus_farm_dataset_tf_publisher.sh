@@ -23,10 +23,11 @@ rosrun tf2_ros static_transform_publisher -0.0061 0.0157  -0.1895 0.4987 0.5050 
 rosrun tf2_ros static_transform_publisher -0.0663 0.0956  -0.0161 0.0020 -0.0081 0.0031  1.0000  flir_blackfly    zed2i_base_link&
 rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 0.0000  1.0000     zed2i_base_link  zed2i_rgb_left&
 
-#rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 0.0000  1.0000     zed2i_base_link  zed2i_left_camera_optical_frame&
-rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 -1.5708 0.0000     zed2i_base_link  zed2i_base_link_pitch&
-rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 -1.5708 0.0000 0.0000     zed2i_base_link_pitch  zed2i_base_link_roll&
-rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 3.1416     zed2i_base_link_roll  zed2i_left_camera_optical_frame&
+rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 0.0000  1.0000     zed2i_base_link  zed2i_left_camera_optical_frame&
+#rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 1.5708 -1.5708 0.0000     zed2i_base_link  zed2i_left_camera_optical_frame&
+#rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 -1.5708 0.0000     zed2i_base_link  zed2i_base_link_pitch&
+#rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 -1.5708 0.0000 0.0000     zed2i_base_link_pitch  zed2i_base_link_roll&
+#rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 3.1416     zed2i_base_link_roll  zed2i_left_camera_optical_frame&
 
 rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000 0.0000 0.0000 0.0000  1.0000     zed2i_base_link  zed2i_imu_link&
 rosrun tf2_ros static_transform_publisher 0.1198  -0.0003 -0.0046 0.0013 0.0013  0.0000  1.0000  zed2i_rgb_left   zed2i_rgb_right&
