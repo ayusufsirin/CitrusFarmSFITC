@@ -23,7 +23,7 @@ ZED_RGB_TOPIC = '/zed2i/zed_node/left/image_rect_color'  # '/islam/zed/rgb'
 
 VLP_TOPIC = "/cumulative_origin_point_cloud"
 
-LOAM_ODOM_TOPIC = '/islam/vlp_odom'
+ODOM_TOPIC = '/jackal_velocity_controller/odom'
 
 VLP_DEPTH_TOPIC = "/islam/vlp_depth"
 PG_DEPTH_TOPIC = "/islam/pg_depth"
@@ -431,7 +431,7 @@ bridge = CvBridge()
 zed_img_init = rospy.wait_for_message(ZED_DEPTH_TOPIC, Image)
 ZED_V, ZED_H = cp.array(bridge.imgmsg_to_cv2(zed_img_init, "32FC1")).shape
 # --- Store ZED's initial frame_id ---
-zed_depth_frame_id = 'map'  # zed_img_init.header.frame_id
+zed_depth_frame_id = zed_img_init.header.frame_id
 rospy.loginfo(f"Detected ZED Depth Frame ID: {zed_depth_frame_id}")
 
 cp_to_np_time_ms = 0
@@ -888,7 +888,7 @@ depth_sub = message_filters.Subscriber(ZED_DEPTH_TOPIC, Image)
 vlp_sub = message_filters.Subscriber(VLP_TOPIC, PointCloud2)
 rgb_sub = message_filters.Subscriber(ZED_RGB_TOPIC, Image)
 cam_info_sub = message_filters.Subscriber(ZED_CAMERA_INFO_TOPIC, CameraInfo)
-odom_sub = message_filters.Subscriber(LOAM_ODOM_TOPIC, Odometry)
+odom_sub = message_filters.Subscriber(ODOM_TOPIC, Odometry)
 
 # Create an ApproximateTimeSynchronizer
 # queue_size: How many sets of messages to buffer
