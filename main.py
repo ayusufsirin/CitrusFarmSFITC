@@ -800,7 +800,9 @@ def synchronized_callback(
     # %% Publish PG depth image
     # Publish Image
     pg_depth_msg = bridge.cv2_to_imgmsg(pg_depth.get())
-    pg_depth_msg.header.stamp = zed_img_msg.header.stamp
+    # TODO: Check if this stamp is correct
+    # pg_depth_msg.header.stamp = zed_img_msg.header.stamp
+    pg_depth_msg.header.stamp = rospy.get_rostime().now()
     pg_depth_p.publish(pg_depth_msg)
     rospy.logwarn("pg_depth published")
 

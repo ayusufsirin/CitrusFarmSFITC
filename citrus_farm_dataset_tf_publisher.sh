@@ -13,11 +13,11 @@ cleanup() {
 trap cleanup SIGINT
 
 # https://ucr-robotics.github.io/Citrus-Farm-Dataset/calibration.html
-# TODO: Set transform offsets
 rosrun tf static_transform_publisher 0 0 0 0 0 0 map odom 100&
 python3 $(dirname $0)/odom_to_tf.py&
 rosrun tf2_ros static_transform_publisher 0.0400  0.0000  0.3787  0.0000 0.0000  0.0000  1.0000  base_link        velodyne&
 rosrun tf2_ros static_transform_publisher -0.2200 0.0000  0.1530  0.0000 0.0000  0.0000  1.0000  velodyne         gps_rtk&
+rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000  0.0000 0.0000  0.0000  1.0000  map         rtk_path_frame&
 rosrun tf2_ros static_transform_publisher 0.2178  0.0049  -0.0645 0.5076 -0.4989 0.4960  -0.4974 velodyne         flir_blackfly&
 rosrun tf2_ros static_transform_publisher -0.0061 0.0157  -0.1895 0.4987 0.5050  -0.4987 0.4977  flir_blackfly    microstrain_link&
 rosrun tf2_ros static_transform_publisher -0.0663 0.0956  -0.0161 0.0020 -0.0081 0.0031  1.0000  flir_blackfly    zed2i_base_link&
