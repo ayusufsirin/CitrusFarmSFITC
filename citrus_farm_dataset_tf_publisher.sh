@@ -15,6 +15,8 @@ trap cleanup SIGINT
 # https://ucr-robotics.github.io/Citrus-Farm-Dataset/calibration.html
 rosrun tf static_transform_publisher 0 0 0 0 0 0 map odom 100&
 python3 $(dirname $0)/odom_to_tf.py&
+# rosrun tf2_ros static_transform_publisher x y z qx qy qz qw parent child
+# rosrun tf2_ros static_transform_publisher x y z roll pitch yaw parent child
 rosrun tf2_ros static_transform_publisher 0.0400  0.0000  0.3787  0.0000 0.0000  0.0000  1.0000  base_link        velodyne&
 rosrun tf2_ros static_transform_publisher -0.2200 0.0000  0.1530  0.0000 0.0000  0.0000  1.0000  velodyne         gps_rtk&
 rosrun tf2_ros static_transform_publisher 0.0000 0.0000  0.0000  0.0000 0.0000  0.0000  1.0000  map         rtk_path_frame&
