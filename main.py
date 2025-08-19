@@ -17,6 +17,11 @@ from nav_msgs.msg import Odometry
 from sensor_msgs.msg import PointCloud2, Image, CameraInfo
 
 # %%
+SYNTHETIC_DATA = False
+PUBLISH_PC = False
+PUBLISH_AUX = False
+
+# %%
 ZED_DEPTH_TOPIC = '/zed2i/zed_node/depth/depth_registered'  # '/islam/zed/depth'  # '/islam/zed_depth'
 ZED_CAMERA_INFO_TOPIC = '/zed2i/zed_node/depth/camera_info'  # '/islam/zed/camera_info'
 ZED_RGB_TOPIC = '/zed2i/zed_node/left/image_rect_color'  # '/islam/zed/rgb'
@@ -438,6 +443,107 @@ cp_to_np_time_ms = 0
 pc_to_msg_time_ms = 0
 
 
+def cart_pts_to_pc_msg(cart_pts, header):
+    # Convert CuPy array to NumPy for pc2.create_cloud
+    global cp_to_np_time_ms, pc_to_msg_time_ms
+    cp_to_np_start_time = time.time()
+    cart_pts_np = cart_pts.get()
+    cp_to_np_end_time = time.time()
+    cp_to_np_time_ms = (cp_to_np_end_time - cp_to_np_start_time) * 1000
+
+    fields = [
+        pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
+        pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
+        pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
+    ]
+
+    pc_to_msg_start_time = time.time()
+    # pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
+    pc_msg = create_cloud_from_np(header, fields, cart_pts_np)
+    pc_to_msg_end_time = time.time()
+    pc_to_msg_time_ms = (pc_to_msg_end_time - pc_to_msg_start_time) * 1000
+    return pc_msg
+
+def cart_pts_to_depth_image(cart_pts, camera_info_msg, image_shape):
+    """
+    Vectorized projection of 3D points to a depth image using camera intrinsics.
+    Args:
+        cart_pts: CuPy array (N, 3), in camera frame with X=forward
+        camera_info_msg: sensor_msgs/CameraInfo
+        image_shape: (H, W)
+    Returns:
+        depth_image: CuPy array (H, W) with float32 values
+    """
+
+    fx = camera_info_msg.K[0]
+    fy = camera_info_msg.K[4]
+    cx = camera_info_msg.K[2]
+    cy = camera_info_msg.K[5]
+
+    # Convert from your axis convention (New X = Old Z_camera, etc.)
+    Z = cart_pts[:, 0]
+    X = -cart_pts[:, 1]
+    Y = -cart_pts[:, 2]
+
+    # Image coordinates
+    u = cp.round((X * fx) / Z + cx).astype(cp.int32)
+    v = cp.round((Y * fy) / Z + cy).astype(cp.int32)
+
+    H, W = image_shape
+    valid = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (Z > 0) & cp.isfinite(Z)
+    u = u[valid]
+    v = v[valid]
+    Z = Z[valid]
+
+    # Compute flat indices for fast scatter
+    flat_idx = v * W + u
+    sorted_idx = cp.argsort(flat_idx)
+
+    flat_idx = flat_idx[sorted_idx]
+    Z_sorted = Z[sorted_idx]
+
+    # Find first occurrence of each (u, v)
+    unique_idx, first_pos = cp.unique(flat_idx, return_index=True)
+    Z_min = Z_sorted[first_pos]
+
+    # Reconstruct 2D depth image
+    depth_img_flat = cp.full(H * W, cp.nan, dtype=cp.float32)
+    depth_img_flat[unique_idx] = Z_min
+    depth_img = depth_img_flat.reshape(H, W)
+
+    return depth_img
+
+def depth_to_cart_pts(depth, camera_info_msg):
+    # Get camera intrinsics from CameraInfo message
+    fx = camera_info_msg.K[0]
+    fy = camera_info_msg.K[4]
+    cx = camera_info_msg.K[2]
+    cy = camera_info_msg.K[5]
+
+    # Convert depth image to point cloud
+    rows, cols = depth.shape
+    u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
+
+    # CuPy operations for point cloud generation
+    Z = depth
+    X = (u - cx) * Z / fx
+    Y = (v - cy) * Z / fy
+
+    # Stack into N x 3 points
+    # cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
+
+    # Filter out invalid points (e.g., where Z is 0 or NaN)
+    valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
+
+    # Apply the rotation:
+    # New X (forward) = Old Z_camera
+    # New Y (left)    = Old (-X_camera)
+    # New Z (up)      = Old (-Y_camera)
+    cart_pts = cp.stack((Z, -X, -Y), axis=-1).reshape(-1, 3)
+
+    cart_pts = cart_pts[valid_mask]
+    return cart_pts
+
 # %% Subscriber and Synchronizer Setup
 
 def synchronized_callback(
@@ -464,55 +570,6 @@ def synchronized_callback(
     total_start_time = time.time()
 
     # %% VLP Preproc
-    def cart_pts_to_depth_image(cart_pts, camera_info_msg, image_shape):
-        """
-        Vectorized projection of 3D points to a depth image using camera intrinsics.
-        Args:
-            cart_pts: CuPy array (N, 3), in camera frame with X=forward
-            camera_info_msg: sensor_msgs/CameraInfo
-            image_shape: (H, W)
-        Returns:
-            depth_image: CuPy array (H, W) with float32 values
-        """
-
-        fx = camera_info_msg.K[0]
-        fy = camera_info_msg.K[4]
-        cx = camera_info_msg.K[2]
-        cy = camera_info_msg.K[5]
-
-        # Convert from your axis convention (New X = Old Z_camera, etc.)
-        Z = cart_pts[:, 0]
-        X = -cart_pts[:, 1]
-        Y = -cart_pts[:, 2]
-
-        # Image coordinates
-        u = cp.round((X * fx) / Z + cx).astype(cp.int32)
-        v = cp.round((Y * fy) / Z + cy).astype(cp.int32)
-
-        H, W = image_shape
-        valid = (u >= 0) & (u < W) & (v >= 0) & (v < H) & (Z > 0) & cp.isfinite(Z)
-        u = u[valid]
-        v = v[valid]
-        Z = Z[valid]
-
-        # Compute flat indices for fast scatter
-        flat_idx = v * W + u
-        sorted_idx = cp.argsort(flat_idx)
-
-        flat_idx = flat_idx[sorted_idx]
-        Z_sorted = Z[sorted_idx]
-
-        # Find first occurrence of each (u, v)
-        unique_idx, first_pos = cp.unique(flat_idx, return_index=True)
-        Z_min = Z_sorted[first_pos]
-
-        # Reconstruct 2D depth image
-        depth_img_flat = cp.full(H * W, cp.nan, dtype=cp.float32)
-        depth_img_flat[unique_idx] = Z_min
-        depth_img = depth_img_flat.reshape(H, W)
-
-        return depth_img
-
     vlp_preproc_start_time = time.time()
 
     msg_to_pts_start_time = time.time()
@@ -557,8 +614,9 @@ def synchronized_callback(
     if len(vlp_sph_pts) > 0:  # Ensure there are points to publish
         # %% Convert filtered spherical points back to Cartesian for publishing
         sph_to_cart_pts_start_time = time.time()
-        vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
-        vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get()  # CuPy to NumPy
+        if PUBLISH_PC:
+            vlp_filtered_cart_pts = sph_to_cart_pts(vlp_sph_pts.copy())
+            vlp_filtered_cart_pts_np = vlp_filtered_cart_pts.get()  # CuPy to NumPy
         sph_to_cart_pts_end_time = time.time()
         sph_to_cart_pts_time_ms = (sph_to_cart_pts_end_time - sph_to_cart_pts_start_time) * 1000
 
@@ -578,8 +636,9 @@ def synchronized_callback(
             pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
         ]
         # vlp_filtered_pc_msg = pc2.create_cloud(header, fields, vlp_filtered_cart_pts_np)
-        vlp_filtered_pc_msg = create_cloud_from_np(header, fields, vlp_filtered_cart_pts_np)
-        vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
+        if PUBLISH_PC:
+            vlp_filtered_pc_msg = create_cloud_from_np(header, fields, vlp_filtered_cart_pts_np)
+            vlp_filtered_pc_p.publish(vlp_filtered_pc_msg)
         filtered_publish_end_time = time.time()
         filtered_publish_time_ms = (filtered_publish_end_time - filtered_publish_start_time) * 1000
 
@@ -593,7 +652,7 @@ def synchronized_callback(
 
     # %% Synthetic Data
 
-    if False:
+    if SYNTHETIC_DATA:
         srtrgs_start = time.time()
         # ---------- parameters ----------
         img_size = zed_depth_original.shape  # overall image size  (rows, cols)
@@ -706,82 +765,34 @@ def synchronized_callback(
 
     # Ensure pg_camera_info_msg has valid data before proceeding
     if pg_camera_info_msg.K and pg_camera_info_msg.P:
-        def depth_to_cart_pts(depth, camera_info_msg):
-            # Get camera intrinsics from CameraInfo message
-            fx = camera_info_msg.K[0]
-            fy = camera_info_msg.K[4]
-            cx = camera_info_msg.K[2]
-            cy = camera_info_msg.K[5]
-
-            # Convert depth image to point cloud
-            rows, cols = depth.shape
-            u, v = cp.meshgrid(cp.arange(cols), cp.arange(rows))
-
-            # CuPy operations for point cloud generation
-            Z = depth
-            X = (u - cx) * Z / fx
-            Y = (v - cy) * Z / fy
-
-            # Stack into N x 3 points
-            # cart_pts = cp.stack((X, Y, Z), axis=-1).reshape(-1, 3)
-
-            # Filter out invalid points (e.g., where Z is 0 or NaN)
-            valid_mask = (Z.flatten() > 0) & cp.isfinite(Z.flatten())
-
-            # Apply the rotation:
-            # New X (forward) = Old Z_camera
-            # New Y (left)    = Old (-X_camera)
-            # New Z (up)      = Old (-Y_camera)
-            cart_pts = cp.stack((Z, -X, -Y), axis=-1).reshape(-1, 3)
-
-            cart_pts = cart_pts[valid_mask]
-            return cart_pts
 
         depth_to_cart_start_time = time.time()
-        fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
-        zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
-        zed_original_cart_pts = depth_to_cart_pts(zed_depth_original, camera_info_msg=pg_camera_info_msg)
-        vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
+        if PUBLISH_PC:
+            fused_cart_pts = depth_to_cart_pts(pg_depth, camera_info_msg=pg_camera_info_msg)
+            zed_cart_pts = depth_to_cart_pts(zed_depth, camera_info_msg=pg_camera_info_msg)
+            zed_original_cart_pts = depth_to_cart_pts(zed_depth_original, camera_info_msg=pg_camera_info_msg)
+            vlp_cart_pts = depth_to_cart_pts(vlp_depth, camera_info_msg=pg_camera_info_msg)
         depth_to_cart_end_time = time.time()
         depth_to_cart_time_ms = (depth_to_cart_end_time - depth_to_cart_start_time) * 1000
-
-        def cart_pts_to_pc_msg(cart_pts, header):
-            # Convert CuPy array to NumPy for pc2.create_cloud
-            global cp_to_np_time_ms, pc_to_msg_time_ms
-            cp_to_np_start_time = time.time()
-            cart_pts_np = cart_pts.get()
-            cp_to_np_end_time = time.time()
-            cp_to_np_time_ms = (cp_to_np_end_time - cp_to_np_start_time) * 1000
-
-            fields = [
-                pc2.PointField('x', 0, pc2.PointField.FLOAT32, 1),
-                pc2.PointField('y', 4, pc2.PointField.FLOAT32, 1),
-                pc2.PointField('z', 8, pc2.PointField.FLOAT32, 1),
-            ]
-
-            pc_to_msg_start_time = time.time()
-            # pc_msg = pc2.create_cloud(header, fields, cart_pts_np)
-            pc_msg = create_cloud_from_np(header, fields, cart_pts_np)
-            pc_to_msg_end_time = time.time()
-            pc_to_msg_time_ms = (pc_to_msg_end_time - pc_to_msg_start_time) * 1000
-            return pc_msg
 
         # Create PointCloud2 message
         header = zed_img_msg.header
         header.frame_id = zed_depth_frame_id  # pg_camera_info_msg.header.frame_id # Ensure frame_id is correct (usually camera_link/optical_frame)
 
         pts_to_pc_start_time = time.time()
-        pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
-        zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
-        zed_original_pc_msg = cart_pts_to_pc_msg(zed_original_cart_pts, header)
-        vlp_pc_msg = cart_pts_to_pc_msg(vlp_cart_pts, header)
+        if PUBLISH_PC:
+            pg_fused_pc_msg = cart_pts_to_pc_msg(fused_cart_pts, header)
+            zed_pc_msg = cart_pts_to_pc_msg(zed_cart_pts, header)
+            zed_original_pc_msg = cart_pts_to_pc_msg(zed_original_cart_pts, header)
+            vlp_pc_msg = cart_pts_to_pc_msg(vlp_cart_pts, header)
         pts_to_pc_end_time = time.time()
         pts_to_pc_time_ms = (pts_to_pc_end_time - pts_to_pc_start_time) * 1000
 
-        pg_fused_pc_p.publish(pg_fused_pc_msg)
-        zed_pc_p.publish(zed_pc_msg)
-        zed_original_pc_p.publish(zed_original_pc_msg)
-        vlp_debug_pc_p.publish(vlp_pc_msg)
+        if PUBLISH_PC:
+            pg_fused_pc_p.publish(pg_fused_pc_msg)
+            zed_pc_p.publish(zed_pc_msg)
+            zed_original_pc_p.publish(zed_original_pc_msg)
+            vlp_debug_pc_p.publish(vlp_pc_msg)
         rospy.loginfo("publish_pg")
     else:
         rospy.logwarn("CameraInfo not received yet or invalid, skipping fused point cloud publication.")
@@ -792,10 +803,11 @@ def synchronized_callback(
 
     # %% Publish VLP depth image
     # Publish Image
-    vlp_depth_msg = bridge.cv2_to_imgmsg(vlp_depth.get())
-    vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
-    vlp_depth_p.publish(vlp_depth_msg)
-    rospy.logwarn("vlp_depth published")
+    if PUBLISH_PC:
+        vlp_depth_msg = bridge.cv2_to_imgmsg(vlp_depth.get())
+        vlp_depth_msg.header.stamp = zed_img_msg.header.stamp
+        vlp_depth_p.publish(vlp_depth_msg)
+        rospy.logwarn("vlp_depth published")
 
     # %% Publish PG depth image
     # Publish Image
@@ -807,13 +819,14 @@ def synchronized_callback(
     rospy.logwarn("pg_depth published")
 
     # %% Publish aux info
-    pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
-    pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
-    pg_odom_msg.header.stamp = zed_img_msg.header.stamp
-    pg_rgb_p.publish(pg_rgb_msg)
-    pg_camera_info_p.publish(pg_camera_info_msg)
-    pg_odom_p.publish(pg_odom_msg)
-    rospy.loginfo("pg_odom published")
+    if PUBLISH_AUX:
+        pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
+        pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
+        pg_odom_msg.header.stamp = zed_img_msg.header.stamp
+        pg_rgb_p.publish(pg_rgb_msg)
+        pg_camera_info_p.publish(pg_camera_info_msg)
+        pg_odom_p.publish(pg_odom_msg)
+        rospy.loginfo("pg_odom published")
 
     # End timing for the entire zed_callback processing
     total_end_time = time.time()
