@@ -45,7 +45,7 @@ VLP_DEBUG_PC_TOPIC = "/islam/vlp_debug_pointcloud"
 CURRENT_NCUTOFF = 0.16
 CURRENT_NCUTOFF_L = 0.08
 CURRENT_NCUTOFF_H = 0.08
-CURRENT_THRESHOLD = 33
+CURRENT_THRESHOLD = 10
 MORTAL_ROWS_TOP = 250 # 0  # 250
 MORTAL_ROWS_BOTTOM = 320 # 20  # 320
 MORTAL_COLUMNS_LEFT = 70 # 500  # 70
@@ -737,12 +737,20 @@ def synchronized_callback(
         constant_values=cp.nan
     )
 
-    pg_depth = cp.pad(
-        pg_depth_cropped,
-        ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
-        mode='constant',
-        constant_values=cp.nan
-    )
+    # TODO: Check if this is really required
+    # pg_depth = cp.pad(
+    #     pg_depth_cropped,
+    #     ((MORTAL_ROWS_TOP, MORTAL_ROWS_BOTTOM), (MORTAL_COLUMNS_LEFT, MORTAL_COLUMNS_RIGHT)),
+    #     mode='constant',
+    #     constant_values=cp.nan
+    # )
+
+    t, l = MORTAL_ROWS_TOP, MORTAL_COLUMNS_LEFT
+    h, w = pg_depth_cropped.shape
+
+    pg_depth = zed_depth_original.copy()
+    region = pg_depth[t:t + h, l:l + w]  # this is the zed region
+    pg_depth[t:t + h, l:l + w] = cp.where(cp.isnan(pg_depth_cropped), region, pg_depth_cropped)
 
     fusion_end_time = time.time()  # End timing fusion part
     fusion_time_ms = (fusion_end_time - fusion_start_time) * 1000
@@ -819,11 +827,12 @@ def synchronized_callback(
     rospy.logwarn("pg_depth published")
 
     # %% Publish aux info
+    pg_rgb_msg.header.stamp = rospy.get_rostime().now()
+    pg_rgb_p.publish(pg_rgb_msg)
     if PUBLISH_AUX:
         pg_rgb_msg.header.stamp = zed_img_msg.header.stamp
         pg_camera_info_msg.header.stamp = zed_img_msg.header.stamp
         pg_odom_msg.header.stamp = zed_img_msg.header.stamp
-        pg_rgb_p.publish(pg_rgb_msg)
         pg_camera_info_p.publish(pg_camera_info_msg)
         pg_odom_p.publish(pg_odom_msg)
         rospy.loginfo("pg_odom published")
