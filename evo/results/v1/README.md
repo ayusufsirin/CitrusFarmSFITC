@@ -39,6 +39,16 @@ evo_traj tum $ZED --ref $GT -a --plot --plot_mode xy --save_plot zed_vs_gt_xy.pn
 evo_traj tum $PG  --ref $GT -a --plot --plot_mode xy --save_plot pg_vs_gt_xy.png
 ```
 
+# Plot
+
+```bash
+evo_traj tum zed_rtabmap_odom.tum pg_rtabmap_odom.tum no_pg_rtabmap_odom.tum \
+  --ref gps_fix_odometry.tum -a --plot --plot_mode xy \
+  --save_plot both_vs_gt_xy.png
+```
+
+![both_vs_gt_xy_trajectories.png](../v0/both_vs_gt_xy_trajectories.png)
+
 # Evaluation
 
 ## Metrics
