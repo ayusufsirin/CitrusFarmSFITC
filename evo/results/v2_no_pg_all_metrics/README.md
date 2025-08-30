@@ -50,6 +50,16 @@ evo_traj tum $PG  --ref $GT -a --plot --plot_mode xy --save_plot pg_vs_gt_xy.png
 evo_traj tum $NO_PG  --ref $GT -a --plot --plot_mode xy --save_plot no_pg_vs_gt_xy.png
 ```
 
+# Plot
+
+```bash
+evo_traj tum zed_rtabmap_odom.tum pg_rtabmap_odom.tum no_pg_rtabmap_odom.tum \
+  --ref gps_fix_odometry.tum -a --plot --plot_mode xy \
+  --save_plot both_vs_gt_xy.png
+```
+
+![both_vs_gt_xy_trajectories.png](../v2_no_pg/both_vs_gt_xy_trajectories.png)
+
 # Evaluation
 
 **Global accuracy (ATE).** After alignment to RTK, **PG** yields the best global accuracy: **SE(3) ATE RMSE 0.912 m** vs
