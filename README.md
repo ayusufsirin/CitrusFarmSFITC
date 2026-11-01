@@ -1,5 +1,12 @@
 # SFITC
 
+> [!IMPORTANT]
+> This repository is archived thesis-era ROS 1 work. It contains the standalone
+> Papoulis-Gerchberg fusion implementation and Citrus Farm evaluations preserved
+> for historical reproducibility. Active development continues in
+> [sfitc-ros2](https://github.com/ayusufsirin/sfitc-ros2). The final pre-archive
+> implementation is tagged `thesis-code-final-2025`.
+
 ## Algorithm
 
 ```mermaid
